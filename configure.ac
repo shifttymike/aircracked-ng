@@ -153,6 +153,18 @@ AIRCRACK_NG_PCRE
 AIRCRACK_NG_RFKILL
 AIRCRACK_NG_SQLITE
 AIRCRACK_NG_ZLIB
+PKG_CHECK_MODULES([NCURSES], [ncursesw], [
+		NCURSES_FOUND=yes
+		AC_SUBST([NCURSES_CFLAGS])
+		AC_SUBST([NCURSES_LIBS])
+	], [
+		PKG_CHECK_MODULES([NCURSES], [ncurses], [
+			NCURSES_FOUND=yes
+			AC_SUBST([NCURSES_CFLAGS])
+			AC_SUBST([NCURSES_LIBS])
+		], [NCURSES_FOUND=no])
+	])
+AM_CONDITIONAL([HAVE_NCURSES], [test "$NCURSES_FOUND" = yes])
 PKG_CHECK_MODULES([CMOCKA], [cmocka], [
 		CMOCKA_FOUND=yes
 		AC_SUBST([CMOCKA_CFLAGS])
@@ -326,6 +338,7 @@ ${PACKAGE} ${VERSION}
     Jemalloc:                    ${JEMALLOC}
     Pcap:                        ${PCAP_FOUND}
     Pcre:                        ${HAVE_PCRE}
+    Ncurses:                     ${NCURSES_FOUND}
     Sqlite:                      ${HAVE_SQLITE3}
     Tcmalloc:                    ${TCMALLOC}
     Zlib:                        ${HAVE_ZLIB}

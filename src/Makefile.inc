@@ -63,6 +63,7 @@ SRC_WC			= %D%/wpaclean/wpaclean.c
 SRC_AV			= %D%/airventriloquist-ng/airventriloquist-ng.c
 SRC_SESSION	= %D%/aircrack-ng/session.c
 SRC_DWRITE	= %D%/airodump-ng/dump_write.c
+SRC_ADU_TUI	= %D%/airodump-ng/airodump_tui.c
 
 bin_PROGRAMS += aircrack-ng \
                 airdecap-ng \
@@ -127,10 +128,15 @@ aireplay_ng_SOURCES	= $(SRC_AR)
 aireplay_ng_CFLAGS	= $(COMMON_CFLAGS) $(LIBNL_CFLAGS)
 aireplay_ng_LDADD		= $(COMMON_LDADD) $(LIBAIRCRACK_OSDEP_LIBS) $(LIBACCRYPTO_LIBS) $(AIRPCAP_LIBS) $(LIBAIRCRACK_LIBS) $(CRYPTO_LIBS)
 
-airodump_ng_SOURCES		= $(SRC_ADU) $(SRC_DWRITE)
+airodump_ng_SOURCES		= $(SRC_ADU) $(SRC_DWRITE) $(SRC_ADU_TUI)
 airodump_ng_CFLAGS		= $(COMMON_CFLAGS) $(PCRE_CFLAGS) $(LIBNL_CFLAGS)
 airodump_ng_CPPFLAGS	= $(AM_CPPFLAGS) -I$(abs_srcdir)/src/airodump-ng
 airodump_ng_LDADD			= $(COMMON_LDADD) $(PCRE_LIBS) $(LIBAIRCRACK_OSDEP_LIBS) $(LIBACCRYPTO_LIBS) $(LIBAIRCRACK_CE_WEP_LIBS) $(AIRPCAP_LIBS) $(LIBAIRCRACK_LIBS) $(CRYPTO_LIBS)
+
+if HAVE_NCURSES
+airodump_ng_CFLAGS		+= $(NCURSES_CFLAGS)
+airodump_ng_LDADD		+= $(NCURSES_LIBS)
+endif
 
 airserv_ng_SOURCES	= $(SRC_AS)
 airserv_ng_CFLAGS		= $(COMMON_CFLAGS) $(LIBNL_CFLAGS)

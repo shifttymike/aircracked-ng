@@ -113,7 +113,16 @@ void moveto(int x, int y);
 
 /// Move the cursor a specified number of positions, in the specified
 /// direction.
-void move(int which, int n);
+void console_move(int which, int n);
+
+/*
+ * Keep the historical call site name available while avoiding clashes with
+ * ncurses' own move() declaration.
+ */
+#ifdef move
+#undef move
+#endif
+#define move console_move
 
 /// \brief Erase a subset of the terminal console.
 /**

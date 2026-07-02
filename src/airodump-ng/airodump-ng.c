@@ -87,6 +87,7 @@
 #include "aircrack-ng/support/common.h"
 #include "aircrack-ng/support/mcs_index_rates.h"
 #include "aircrack-ng/utf8/verifyssid.h"
+#include "airodump_tui.h"
 #include "aircrack-ng/tui/console.h"
 #include "radiotap/radiotap.h"
 #include "radiotap/radiotap_iter.h"
@@ -562,12 +563,18 @@ static int * frequencies;
 
 static volatile int quitting = 0;
 static volatile time_t quitting_event_ts = 0;
+static int use_ncurses_tui = 0;
+static volatile sig_atomic_t tui_resize_pending = 0;
+static struct airodump_tui_state tui_state;
 
 static void dump_sort(void);
 static void dump_print(int ws_row, int ws_col, int if_num);
 static char *
 get_manufacturer(unsigned char mac0, unsigned char mac1, unsigned char mac2);
 int is_filtered_essid(const uint8_t * essid);
+static int handle_keycode(int keycode);
+static void render_output(void);
+static void restore_terminal(void);
 
 /* bunch of global stuff */
 struct communication_options opt;
@@ -1057,251 +1064,13 @@ static THREAD_ENTRY(input_thread)
 
 	while (lopt.do_exit == 0)
 	{
-		int keycode = 0;
+		int keycode = mygetch();
 
-		keycode = mygetch();
-
-		if (keycode == KEY_q)
-		{
-			quitting_event_ts = time(NULL);
-
-			if (++quitting > 1) //-V1051
-				lopt.do_exit = 1;
-			else
-				snprintf(
-					lopt.message,
-					sizeof(lopt.message),
-					"][ Are you sure you want to quit? Press Q again to quit.");
-		}
-
-		if (keycode == KEY_o)
-		{
-			color_on();
-			snprintf(lopt.message, sizeof(lopt.message), "][ color on");
-		}
-
-		if (keycode == KEY_p)
-		{
-			color_off();
-			snprintf(lopt.message, sizeof(lopt.message), "][ color off");
-		}
-
-		if (keycode == KEY_s)
-		{
-			lopt.sort_by++;
-
-			if (lopt.sort_by > MAX_SORT) lopt.sort_by = 0;
-
-			switch (lopt.sort_by)
-			{
-				case SORT_BY_NOTHING:
-					snprintf(lopt.message,
-							 sizeof(lopt.message),
-							 "][ sorting by first seen");
-					break;
-				case SORT_BY_BSSID:
-					snprintf(lopt.message,
-							 sizeof(lopt.message),
-							 "][ sorting by bssid");
-					break;
-				case SORT_BY_POWER:
-					snprintf(lopt.message,
-							 sizeof(lopt.message),
-							 "][ sorting by power level");
-					break;
-				case SORT_BY_BEACON:
-					snprintf(lopt.message,
-							 sizeof(lopt.message),
-							 "][ sorting by beacon number");
-					break;
-				case SORT_BY_DATA:
-					snprintf(lopt.message,
-							 sizeof(lopt.message),
-							 "][ sorting by number of data packets");
-					break;
-				case SORT_BY_PRATE:
-					snprintf(lopt.message,
-							 sizeof(lopt.message),
-							 "][ sorting by packet rate");
-					break;
-				case SORT_BY_CHAN:
-					snprintf(lopt.message,
-							 sizeof(lopt.message),
-							 "][ sorting by channel");
-					break;
-				case SORT_BY_MBIT:
-					snprintf(lopt.message,
-							 sizeof(lopt.message),
-							 "][ sorting by max data rate");
-					break;
-				case SORT_BY_ENC:
-					snprintf(lopt.message,
-							 sizeof(lopt.message),
-							 "][ sorting by encryption");
-					break;
-				case SORT_BY_CIPHER:
-					snprintf(lopt.message,
-							 sizeof(lopt.message),
-							 "][ sorting by cipher");
-					break;
-				case SORT_BY_AUTH:
-					snprintf(lopt.message,
-							 sizeof(lopt.message),
-							 "][ sorting by authentication");
-					break;
-				case SORT_BY_ESSID:
-					snprintf(lopt.message,
-							 sizeof(lopt.message),
-							 "][ sorting by ESSID");
-					break;
-				default:
-					break;
-			}
-			ALLEGE(pthread_mutex_lock(&(lopt.mx_sort)) == 0);
-			dump_sort();
-			ALLEGE(pthread_mutex_unlock(&(lopt.mx_sort)) == 0);
-		}
-
-		if (keycode == KEY_SPACE)
-		{
-			lopt.do_pause = (lopt.do_pause + 1) % 2;
-			if (lopt.do_pause)
-			{
-				snprintf(
-					lopt.message, sizeof(lopt.message), "][ paused output");
-				ALLEGE(pthread_mutex_lock(&(lopt.mx_print)) == 0);
-
-				dump_print(lopt.ws.ws_row, lopt.ws.ws_col, lopt.num_cards);
-
-				ALLEGE(pthread_mutex_unlock(&(lopt.mx_print)) == 0);
-			}
-			else
-				snprintf(
-					lopt.message, sizeof(lopt.message), "][ resumed output");
-		}
-
-		if (keycode == KEY_r)
-		{
-			lopt.do_sort_always = (lopt.do_sort_always + 1) % 2;
-			if (lopt.do_sort_always)
-				snprintf(lopt.message,
-						 sizeof(lopt.message),
-						 "][ realtime sorting activated");
-			else
-				snprintf(lopt.message,
-						 sizeof(lopt.message),
-						 "][ realtime sorting deactivated");
-		}
-
-		if (keycode == KEY_m)
-		{
-			if (lopt.p_selected_ap != NULL)
-			{
-				lopt.mark_cur_ap = 1;
-			}
-		}
-
-		if (keycode == KEY_ARROW_DOWN)
-		{
-			if (lopt.p_selected_ap && lopt.p_selected_ap->prev)
-			{
-				lopt.p_selected_ap = lopt.p_selected_ap->prev;
-				lopt.en_selection_direction = selection_direction_down;
-			}
-		}
-
-		if (keycode == KEY_ARROW_UP)
-		{
-			if (lopt.p_selected_ap && lopt.p_selected_ap->next)
-			{
-				lopt.p_selected_ap = lopt.p_selected_ap->next;
-				lopt.en_selection_direction = selection_direction_up;
-			}
-		}
-
-		if (keycode == KEY_i)
-		{
-			lopt.sort_inv *= -1;
-			if (lopt.sort_inv < 0)
-				snprintf(lopt.message,
-						 sizeof(lopt.message),
-						 "][ inverted sorting order");
-			else
-				snprintf(lopt.message,
-						 sizeof(lopt.message),
-						 "][ normal sorting order");
-		}
-
-		if (keycode == KEY_TAB)
-		{
-			if (lopt.p_selected_ap == NULL)
-			{
-				lopt.p_selected_ap = lopt.ap_end;
-				lopt.en_selection_direction = selection_direction_down;
-				snprintf(lopt.message,
-						 sizeof(lopt.message),
-						 "][ enabled AP selection");
-				lopt.sort_by = SORT_BY_NOTHING;
-			}
-			else
-			{
-				lopt.en_selection_direction = selection_direction_no;
-				lopt.p_selected_ap = NULL;
-				lopt.sort_by = SORT_BY_NOTHING;
-				snprintf(lopt.message,
-						 sizeof(lopt.message),
-						 "][ disabled selection");
-			}
-		}
-
-		if (keycode == KEY_a)
-		{
-			if (lopt.show_ap == 1 && lopt.show_sta == 1 && lopt.show_ack == 0)
-			{
-				lopt.show_ack = 1;
-				snprintf(lopt.message,
-						 sizeof(lopt.message),
-						 "][ display ap+sta+ack");
-			}
-			else if (lopt.show_ap == 1 && lopt.show_sta == 1
-					 && lopt.show_ack == 1)
-			{
-				lopt.show_sta = 0;
-				lopt.show_ack = 0;
-				snprintf(
-					lopt.message, sizeof(lopt.message), "][ display ap only");
-			}
-			else if (lopt.show_ap == 1 && lopt.show_sta == 0
-					 && lopt.show_ack == 0)
-			{
-				lopt.show_ap = 0;
-				lopt.show_sta = 1;
-				snprintf(
-					lopt.message, sizeof(lopt.message), "][ display sta only");
-			}
-			else if (lopt.show_ap == 0 && lopt.show_sta == 1
-					 && lopt.show_ack == 0)
-			{
-				lopt.show_ap = 1;
-				snprintf(
-					lopt.message, sizeof(lopt.message), "][ display ap+sta");
-			}
-		}
-
-		if (keycode == KEY_d)
-		{
-			resetSelection();
-			snprintf(lopt.message,
-					 sizeof(lopt.message),
-					 "][ reset selection to default");
-		}
-
-		if (lopt.do_exit == 0 && !lopt.do_pause)
+		if (handle_keycode(keycode) && !use_ncurses_tui && lopt.do_exit == 0
+			&& !lopt.do_pause)
 		{
 			ALLEGE(pthread_mutex_lock(&(lopt.mx_print)) == 0);
-
-			dump_print(lopt.ws.ws_row, lopt.ws.ws_col, lopt.num_cards);
-
+			render_output();
 			ALLEGE(pthread_mutex_unlock(&(lopt.mx_print)) == 0);
 		}
 	}
@@ -4296,6 +4065,450 @@ static int IsAp2BeSkipped(struct AP_info * ap_cur)
 	return (0);
 }
 
+static void render_output(void)
+{
+	if (use_ncurses_tui)
+	{
+		struct airodump_tui_view view;
+
+		if (lopt.p_selected_ap == NULL && lopt.ap_end != NULL && lopt.show_ap)
+		{
+			lopt.p_selected_ap = lopt.ap_end;
+			lopt.en_selection_direction = selection_direction_down;
+		}
+
+		memset(&view, 0, sizeof(view));
+		view.ap_1st = lopt.ap_1st;
+		view.ap_end = lopt.ap_end;
+		view.st_1st = lopt.st_1st;
+		view.selected_ap = lopt.p_selected_ap;
+		view.f_encrypt = lopt.f_encrypt;
+		view.min_pkts = lopt.min_pkts;
+		view.berlin = lopt.berlin;
+		view.asso_client = lopt.asso_client;
+		view.show_ap = lopt.show_ap;
+		view.show_sta = lopt.show_sta;
+		view.show_ack = lopt.show_ack;
+		view.singlechan = lopt.singlechan;
+		view.show_uptime = lopt.show_uptime;
+		view.show_manufacturer = lopt.show_manufacturer;
+		view.show_wps = lopt.show_wps;
+		view.freqoption = lopt.freqoption;
+		view.num_cards = lopt.num_cards;
+		memcpy(view.channel, lopt.channel, sizeof(view.channel));
+		memcpy(view.frequency, lopt.frequency, sizeof(view.frequency));
+		view.message = lopt.message;
+		view.batt = lopt.batt;
+		view.elapsed_time = lopt.elapsed_time;
+		view.do_pause = lopt.do_pause;
+		view.background_mode = lopt.background_mode;
+		view.sort_by = lopt.sort_by;
+		view.sort_inv = lopt.sort_inv;
+
+		airodump_tui_render(&tui_state, &view);
+	}
+	else
+	{
+		dump_print(lopt.ws.ws_row, lopt.ws.ws_col, lopt.num_cards);
+	}
+}
+
+static void restore_terminal(void)
+{
+	if (use_ncurses_tui)
+	{
+		airodump_tui_stop(&tui_state);
+	}
+	else
+	{
+		reset_term();
+		show_cursor();
+	}
+}
+
+static int handle_keycode(int keycode)
+{
+	int redraw = 0;
+
+	if (keycode == KEY_q)
+	{
+		quitting_event_ts = time(NULL);
+
+		if (++quitting > 1) //-V1051
+			lopt.do_exit = 1;
+		else
+			snprintf(
+				lopt.message,
+				sizeof(lopt.message),
+				"][ Are you sure you want to quit? Press Q again to quit.");
+		redraw = 1;
+	}
+
+	if (keycode == KEY_o)
+	{
+		if (use_ncurses_tui)
+			tui_state.colors_enabled = 1;
+		else
+			color_on();
+		snprintf(lopt.message, sizeof(lopt.message), "][ color on");
+		redraw = 1;
+	}
+
+	if (keycode == KEY_p)
+	{
+		if (use_ncurses_tui)
+			tui_state.colors_enabled = 0;
+		else
+			color_off();
+		snprintf(lopt.message, sizeof(lopt.message), "][ color off");
+		redraw = 1;
+	}
+
+	if (keycode == KEY_s)
+	{
+		lopt.sort_by++;
+
+		if (lopt.sort_by > MAX_SORT) lopt.sort_by = 0;
+
+		switch (lopt.sort_by)
+		{
+			case SORT_BY_NOTHING:
+				snprintf(lopt.message,
+						 sizeof(lopt.message),
+						 "][ sorting by first seen");
+				break;
+			case SORT_BY_BSSID:
+				snprintf(lopt.message,
+						 sizeof(lopt.message),
+						 "][ sorting by bssid");
+				break;
+			case SORT_BY_POWER:
+				snprintf(lopt.message,
+						 sizeof(lopt.message),
+						 "][ sorting by power level");
+				break;
+			case SORT_BY_BEACON:
+				snprintf(lopt.message,
+						 sizeof(lopt.message),
+						 "][ sorting by beacon number");
+				break;
+			case SORT_BY_DATA:
+				snprintf(lopt.message,
+						 sizeof(lopt.message),
+						 "][ sorting by number of data packets");
+				break;
+			case SORT_BY_PRATE:
+				snprintf(lopt.message,
+						 sizeof(lopt.message),
+						 "][ sorting by packet rate");
+				break;
+			case SORT_BY_CHAN:
+				snprintf(lopt.message,
+						 sizeof(lopt.message),
+						 "][ sorting by channel");
+				break;
+			case SORT_BY_MBIT:
+				snprintf(lopt.message,
+						 sizeof(lopt.message),
+						 "][ sorting by max data rate");
+				break;
+			case SORT_BY_ENC:
+				snprintf(lopt.message,
+						 sizeof(lopt.message),
+						 "][ sorting by encryption");
+				break;
+			case SORT_BY_CIPHER:
+				snprintf(lopt.message,
+						 sizeof(lopt.message),
+						 "][ sorting by cipher");
+				break;
+			case SORT_BY_AUTH:
+				snprintf(lopt.message,
+						 sizeof(lopt.message),
+						 "][ sorting by authentication");
+				break;
+			case SORT_BY_ESSID:
+				snprintf(lopt.message,
+						 sizeof(lopt.message),
+						 "][ sorting by ESSID");
+				break;
+			default:
+				break;
+		}
+		ALLEGE(pthread_mutex_lock(&(lopt.mx_sort)) == 0);
+		dump_sort();
+		ALLEGE(pthread_mutex_unlock(&(lopt.mx_sort)) == 0);
+		redraw = 1;
+	}
+
+	if (keycode == KEY_SPACE)
+	{
+		lopt.do_pause = (lopt.do_pause + 1) % 2;
+		if (lopt.do_pause)
+		{
+			snprintf(lopt.message, sizeof(lopt.message), "][ paused output");
+			ALLEGE(pthread_mutex_lock(&(lopt.mx_print)) == 0);
+
+			render_output();
+
+			ALLEGE(pthread_mutex_unlock(&(lopt.mx_print)) == 0);
+		}
+		else
+			snprintf(lopt.message, sizeof(lopt.message), "][ resumed output");
+		redraw = 1;
+	}
+
+	if (keycode == KEY_r)
+	{
+		lopt.do_sort_always = (lopt.do_sort_always + 1) % 2;
+		if (lopt.do_sort_always)
+			snprintf(lopt.message,
+					 sizeof(lopt.message),
+					 "][ realtime sorting activated");
+		else
+			snprintf(lopt.message,
+					 sizeof(lopt.message),
+					 "][ realtime sorting deactivated");
+		redraw = 1;
+	}
+
+	if (keycode == KEY_m)
+	{
+		if (lopt.p_selected_ap != NULL)
+		{
+			lopt.mark_cur_ap = 1;
+			redraw = 1;
+		}
+	}
+
+	if (keycode == KEY_ARROW_DOWN)
+	{
+		if (use_ncurses_tui && tui_state.focus == 1)
+		{
+			tui_state.sta_scroll++;
+			redraw = 1;
+		}
+		else if (lopt.p_selected_ap && lopt.p_selected_ap->prev)
+		{
+			lopt.p_selected_ap = lopt.p_selected_ap->prev;
+			lopt.en_selection_direction = selection_direction_down;
+			redraw = 1;
+		}
+	}
+
+	if (keycode == KEY_ARROW_UP)
+	{
+		if (use_ncurses_tui && tui_state.focus == 1)
+		{
+			if (tui_state.sta_scroll > 0) tui_state.sta_scroll--;
+			redraw = 1;
+		}
+		else if (lopt.p_selected_ap && lopt.p_selected_ap->next)
+		{
+			lopt.p_selected_ap = lopt.p_selected_ap->next;
+			lopt.en_selection_direction = selection_direction_up;
+			redraw = 1;
+		}
+	}
+
+	if (keycode == KEY_i)
+	{
+		lopt.sort_inv *= -1;
+		if (lopt.sort_inv < 0)
+			snprintf(lopt.message,
+					 sizeof(lopt.message),
+					 "][ inverted sorting order");
+		else
+			snprintf(lopt.message,
+					 sizeof(lopt.message),
+					 "][ normal sorting order");
+		redraw = 1;
+	}
+
+	if (keycode == KEY_TAB)
+	{
+		if (use_ncurses_tui)
+		{
+			if (lopt.show_ap == 1 && lopt.show_sta == 1)
+				tui_state.focus = (tui_state.focus == 0) ? 1 : 0;
+			else
+				tui_state.focus = 0;
+			redraw = 1;
+		}
+		else if (lopt.p_selected_ap == NULL)
+		{
+			lopt.p_selected_ap = lopt.ap_end;
+			lopt.en_selection_direction = selection_direction_down;
+			snprintf(lopt.message,
+					 sizeof(lopt.message),
+					 "][ enabled AP selection");
+			lopt.sort_by = SORT_BY_NOTHING;
+			redraw = 1;
+		}
+		else
+		{
+			lopt.en_selection_direction = selection_direction_no;
+			lopt.p_selected_ap = NULL;
+			lopt.sort_by = SORT_BY_NOTHING;
+			snprintf(lopt.message,
+					 sizeof(lopt.message),
+					 "][ disabled selection");
+			redraw = 1;
+		}
+	}
+
+	if (keycode == KEY_a)
+	{
+		if (use_ncurses_tui)
+		{
+			if (lopt.show_ap == 1 && lopt.show_sta == 1)
+			{
+				lopt.show_sta = 0;
+				tui_state.focus = 0;
+				snprintf(lopt.message, sizeof(lopt.message), "][ display ap only");
+			}
+			else if (lopt.show_ap == 1 && lopt.show_sta == 0)
+			{
+				lopt.show_ap = 0;
+				lopt.show_sta = 1;
+				tui_state.focus = 1;
+				snprintf(lopt.message, sizeof(lopt.message), "][ display sta only");
+			}
+			else
+			{
+				lopt.show_ap = 1;
+				lopt.show_sta = 1;
+				tui_state.focus = 0;
+				snprintf(lopt.message, sizeof(lopt.message), "][ display ap+sta");
+			}
+			redraw = 1;
+		}
+		else if (lopt.show_ap == 1 && lopt.show_sta == 1 && lopt.show_ack == 0)
+		{
+			lopt.show_ack = 1;
+			snprintf(lopt.message, sizeof(lopt.message), "][ display ap+sta+ack");
+			redraw = 1;
+		}
+		else if (lopt.show_ap == 1 && lopt.show_sta == 1 && lopt.show_ack == 1)
+		{
+			lopt.show_sta = 0;
+			lopt.show_ack = 0;
+			snprintf(lopt.message, sizeof(lopt.message), "][ display ap only");
+			redraw = 1;
+		}
+		else if (lopt.show_ap == 1 && lopt.show_sta == 0 && lopt.show_ack == 0)
+		{
+			lopt.show_ap = 0;
+			lopt.show_sta = 1;
+			snprintf(lopt.message, sizeof(lopt.message), "][ display sta only");
+			redraw = 1;
+		}
+		else if (lopt.show_ap == 0 && lopt.show_sta == 1 && lopt.show_ack == 0)
+		{
+			lopt.show_ap = 1;
+			snprintf(lopt.message, sizeof(lopt.message), "][ display ap+sta");
+			redraw = 1;
+		}
+	}
+
+	if (keycode == KEY_d)
+	{
+		resetSelection();
+		if (use_ncurses_tui)
+		{
+			tui_state.ap_scroll = 0;
+			tui_state.sta_scroll = 0;
+			tui_state.focus = 0;
+		}
+		snprintf(lopt.message,
+				 sizeof(lopt.message),
+				 "][ reset selection to default");
+		redraw = 1;
+	}
+
+#ifdef HAVE_NCURSES
+	if (use_ncurses_tui)
+	{
+		if (keycode == KEY_RESIZE)
+		{
+			tui_resize_pending = 1;
+			redraw = 1;
+		}
+		if (keycode == KEY_UP)
+		{
+			if (tui_state.focus == 1)
+			{
+				if (tui_state.sta_scroll > 0) tui_state.sta_scroll--;
+				redraw = 1;
+			}
+			else if (lopt.p_selected_ap && lopt.p_selected_ap->next)
+			{
+				lopt.p_selected_ap = lopt.p_selected_ap->next;
+				lopt.en_selection_direction = selection_direction_up;
+				redraw = 1;
+			}
+		}
+		if (keycode == KEY_DOWN)
+		{
+			if (tui_state.focus == 1)
+			{
+				tui_state.sta_scroll++;
+				redraw = 1;
+			}
+			else if (lopt.p_selected_ap && lopt.p_selected_ap->prev)
+			{
+				lopt.p_selected_ap = lopt.p_selected_ap->prev;
+				lopt.en_selection_direction = selection_direction_down;
+				redraw = 1;
+			}
+		}
+		if (keycode == KEY_PPAGE)
+		{
+			if (tui_state.focus == 1)
+			{
+				tui_state.sta_scroll -= MAX(1, tui_state.sta_visible_rows);
+				if (tui_state.sta_scroll < 0) tui_state.sta_scroll = 0;
+			}
+			else
+			{
+				tui_state.ap_scroll -= MAX(1, tui_state.ap_visible_rows);
+				if (tui_state.ap_scroll < 0) tui_state.ap_scroll = 0;
+			}
+			redraw = 1;
+		}
+		if (keycode == KEY_NPAGE)
+		{
+			if (tui_state.focus == 1)
+				tui_state.sta_scroll += MAX(1, tui_state.sta_visible_rows);
+			else
+				tui_state.ap_scroll += MAX(1, tui_state.ap_visible_rows);
+			redraw = 1;
+		}
+		if (keycode == KEY_HOME)
+		{
+			if (tui_state.focus == 1)
+				tui_state.sta_scroll = 0;
+			else
+			{
+				lopt.p_selected_ap = lopt.ap_end;
+				tui_state.ap_scroll = 0;
+			}
+			redraw = 1;
+		}
+		if (keycode == KEY_END)
+		{
+			if (tui_state.focus == 1)
+				tui_state.sta_scroll = INT_MAX / 4;
+			else
+				lopt.p_selected_ap = lopt.ap_1st;
+			redraw = 1;
+		}
+	}
+#endif
+
+	return (redraw);
+}
+
 #define CHECK_END_OF_SCREEN()                                                  \
 	do                                                                         \
 	{                                                                          \
@@ -5816,8 +6029,11 @@ static void sighandler(int signum)
 	if (signum == SIGINT || signum == SIGTERM)
 	{
 		lopt.do_exit = 1;
-		show_cursor();
-		reset_term();
+		if (!use_ncurses_tui)
+		{
+			show_cursor();
+			reset_term();
+		}
 		fprintf(stdout, "Quitting...\n");
 	}
 
@@ -5826,7 +6042,7 @@ static void sighandler(int signum)
 		fprintf(stderr,
 				"Caught signal 11 (SIGSEGV). Please"
 				" contact the author!\n\n");
-		show_cursor();
+		if (!use_ncurses_tui) show_cursor();
 		fflush(stdout);
 		exit(1);
 	}
@@ -5836,7 +6052,7 @@ static void sighandler(int signum)
 		fprintf(stdout,
 				"Caught signal 14 (SIGALRM). Please"
 				" contact the author!\n\n");
-		show_cursor();
+		if (!use_ncurses_tui) show_cursor();
 		_exit(1);
 	}
 
@@ -5844,8 +6060,13 @@ static void sighandler(int signum)
 
 	if (signum == SIGWINCH)
 	{
-		erase_display(0);
-		fflush(stdout);
+		if (use_ncurses_tui)
+			tui_resize_pending = 1;
+		else
+		{
+			erase_display(0);
+			fflush(stdout);
+		}
 	}
 }
 
@@ -8061,8 +8282,13 @@ int main(int argc, char * argv[])
 		waitpid(-1, NULL, WNOHANG);
 	}
 
-	hide_cursor();
-	erase_display(2);
+	use_ncurses_tui = airodump_tui_start(&tui_state);
+	(void) atexit(restore_terminal);
+	if (!use_ncurses_tui)
+	{
+		hide_cursor();
+		erase_display(2);
+	}
 
 	start_time = time(NULL);
 	tt1 = time(NULL);
@@ -8095,7 +8321,7 @@ int main(int argc, char * argv[])
 	// background
 	if (lopt.background_mode == -1) lopt.background_mode = is_background();
 
-	if (!lopt.background_mode
+	if (!lopt.background_mode && !use_ncurses_tui
 		&& pthread_create(&(lopt.input_tid), NULL, &input_thread, NULL) != 0)
 	{
 		perror("pthread_create failed");
@@ -8104,6 +8330,8 @@ int main(int argc, char * argv[])
 
 	while (1)
 	{
+		int needs_render = 0;
+
 		if (lopt.do_exit)
 		{
 			break;
@@ -8388,6 +8616,11 @@ int main(int argc, char * argv[])
 			{
 				FD_SET(fd_raw[i], &rfds); // NOLINT(hicpp-signed-bitwise)
 			}
+			if (use_ncurses_tui)
+			{
+				FD_SET(STDIN_FILENO, &rfds);
+				if (STDIN_FILENO > fdh) fdh = STDIN_FILENO;
+			}
 
 			tv0.tv_sec = lopt.update_s;
 			tv0.tv_usec = (lopt.update_s == 0) ? REFRESH_RATE : 0;
@@ -8408,7 +8641,7 @@ int main(int argc, char * argv[])
 				perror("select failed");
 
 				/* Restore terminal */
-				show_cursor();
+				restore_terminal();
 
 				return (EXIT_FAILURE);
 			}
@@ -8420,6 +8653,30 @@ int main(int argc, char * argv[])
 
 		time_slept += 1000000UL * (tv2.tv_sec - tv1.tv_sec)
 					  + (tv2.tv_usec - tv1.tv_usec);
+
+		if (use_ncurses_tui)
+		{
+			int keycode;
+
+			if (tui_resize_pending)
+			{
+				tui_state.resize_pending = 1;
+				tui_resize_pending = 0;
+				needs_render = 1;
+			}
+
+			while ((keycode = airodump_tui_getch(&tui_state)) != ERR)
+			{
+				if (handle_keycode(keycode)) needs_render = 1;
+			}
+		}
+
+		if (needs_render && !lopt.background_mode)
+		{
+			ALLEGE(pthread_mutex_lock(&(lopt.mx_print)) == 0);
+			render_output();
+			ALLEGE(pthread_mutex_unlock(&(lopt.mx_print)) == 0);
+		}
 
 		if (time_slept > REFRESH_RATE && time_slept > lopt.update_s * 1000000)
 		{
@@ -8441,7 +8698,7 @@ int main(int argc, char * argv[])
 			{
 				ALLEGE(pthread_mutex_lock(&(lopt.mx_print)) == 0);
 
-				dump_print(lopt.ws.ws_row, lopt.ws.ws_col, lopt.num_cards);
+				render_output();
 
 				ALLEGE(pthread_mutex_unlock(&(lopt.mx_print)) == 0);
 			}
@@ -8484,7 +8741,7 @@ int main(int argc, char * argv[])
 							printf("Can't reopen %s\n", ifnam);
 
 							/* Restore terminal */
-							show_cursor();
+							restore_terminal();
 
 							exit(EXIT_FAILURE);
 						}
@@ -8578,7 +8835,7 @@ int main(int argc, char * argv[])
 		if (retval != NULL) free(retval);
 	}
 
-	if (!lopt.background_mode)
+	if (!lopt.background_mode && !use_ncurses_tui)
 	{
 		pthread_join(lopt.input_tid, NULL);
 	}
@@ -8639,8 +8896,7 @@ int main(int argc, char * argv[])
 		}
 	}
 
-	reset_term();
-	show_cursor();
+	restore_terminal();
 
 	return (EXIT_SUCCESS);
 }

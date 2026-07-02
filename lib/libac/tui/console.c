@@ -121,7 +121,7 @@ void moveto(int x, int y)
 	fflush(channel);
 }
 
-void move(int which, int n)
+void console_move(int which, int n)
 {
 	char command[13];
 	static const char movement[] = {'A', 'B', 'C', 'D'};
