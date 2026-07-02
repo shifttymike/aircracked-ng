@@ -81,11 +81,48 @@ void ac_crypto_init(void)
 inline int
 encrypt_wep(unsigned char * data, int len, unsigned char * key, int keylen)
 {
-	RC4_KEY S;
+	#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+	EVP_CIPHER_CTX *ctx;
+	int outlen;
 
+	if (!(ctx = EVP_CIPHER_CTX_new())) return -1;
+
+	// 1. Initialize the context with the RC4 algorithm
+	if (EVP_EncryptInit_ex(ctx, EVP_rc4(), NULL, NULL, NULL) != 1)
+	{
+		EVP_CIPHER_CTX_free(ctx);
+		return -1;
+	}
+
+	// 2. Set the key length (Crucial for WEP's variable key sizes)
+	if (EVP_CIPHER_CTX_set_key_length(ctx, keylen) != 1)
+	{
+		EVP_CIPHER_CTX_free(ctx);
+		return -1;
+	}
+
+	// 3. Initialize with the actual key
+	if (EVP_EncryptInit_ex(ctx, NULL, NULL, key, NULL) != 1)
+	{
+		EVP_CIPHER_CTX_free(ctx);
+		return -1;
+	}
+
+	// 4. Encrypt the data
+	if (EVP_EncryptUpdate(ctx, data, &outlen, data, len) != 1)
+	{
+		EVP_CIPHER_CTX_free(ctx);
+		return -1;
+	}
+
+	EVP_CIPHER_CTX_free(ctx);
+	#else
+	// Legacy implementation for OpenSSL < 3.0
+	RC4_KEY S;
 	memset(&S, 0, sizeof(S));
 	RC4_set_key(&S, keylen, key);
 	RC4(&S, (size_t) len, data, data);
+	#endif
 
 	return (0);
 }
@@ -108,9 +145,6 @@ void calc_pmk(char * key, char * essid_pre, unsigned char pmk[static 40])
 	int i, j, slen;
 	unsigned char buffer[65];
 	char essid[33 + 4];
-	SHA_CTX ctx_ipad;
-	SHA_CTX ctx_opad;
-	SHA_CTX sha1_ctx;
 	size_t essid_pre_len;
 
 	if (essid_pre[0] == 0 || (essid_pre_len = strlen(essid_pre)) > 32)
@@ -127,6 +161,77 @@ void calc_pmk(char * key, char * essid_pre, unsigned char pmk[static 40])
 	memset(buffer, 0, sizeof(buffer));
 	strncpy((char *) buffer, key, sizeof(buffer) - 1);
 
+	#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+	EVP_MD_CTX *ctx_ipad = EVP_MD_CTX_new();
+	EVP_MD_CTX *ctx_opad = EVP_MD_CTX_new();
+	EVP_MD_CTX *sha1_ctx = EVP_MD_CTX_new();
+
+	if (!ctx_ipad || !ctx_opad || !sha1_ctx)
+	{
+		if (ctx_ipad) EVP_MD_CTX_free(ctx_ipad);
+		if (ctx_opad) EVP_MD_CTX_free(ctx_opad);
+		if (sha1_ctx) EVP_MD_CTX_free(sha1_ctx);
+		return;
+	}
+
+	for (i = 0; i < 64; i++) buffer[i] ^= 0x36;
+	EVP_DigestInit_ex(ctx_ipad, EVP_sha1(), NULL);
+	EVP_DigestUpdate(ctx_ipad, buffer, 64);
+
+	for (i = 0; i < 64; i++) buffer[i] ^= 0x6A; // 0x36 ^ 0x6A = 0x5C (opad)
+	EVP_DigestInit_ex(ctx_opad, EVP_sha1(), NULL);
+	EVP_DigestUpdate(ctx_opad, buffer, 64);
+
+	/* iterate HMAC-SHA1 over itself 4096 times for the first 20 bytes */
+
+	essid[slen - 1] = '\1';
+	HMAC(EVP_sha1(), (unsigned char *) key, (int) strlen(key),
+		 (unsigned char *) essid, (size_t) slen, pmk, NULL);
+	memcpy(buffer, pmk, 20);
+
+	for (i = 1; i < 4096; i++)
+	{
+		EVP_MD_CTX_copy_ex(sha1_ctx, ctx_ipad);
+		EVP_DigestUpdate(sha1_ctx, buffer, 20);
+		EVP_DigestFinal_ex(sha1_ctx, buffer, NULL);
+
+		EVP_MD_CTX_copy_ex(sha1_ctx, ctx_opad);
+		EVP_DigestUpdate(sha1_ctx, buffer, 20);
+		EVP_DigestFinal_ex(sha1_ctx, buffer, NULL);
+
+		for (j = 0; j < 20; j++) pmk[j] ^= buffer[j];
+	}
+
+	/* iterate HMAC-SHA1 over itself 4096 times for the second 20 bytes */
+
+	essid[slen - 1] = '\2';
+	HMAC(EVP_sha1(), (unsigned char *) key, (int) strlen(key),
+		 (unsigned char *) essid, (size_t) slen, pmk + 20, NULL);
+	memcpy(buffer, pmk + 20, 20);
+
+	for (i = 1; i < 4096; i++)
+	{
+		EVP_MD_CTX_copy_ex(sha1_ctx, ctx_ipad);
+		EVP_DigestUpdate(sha1_ctx, buffer, 20);
+		EVP_DigestFinal_ex(sha1_ctx, buffer, NULL);
+
+		EVP_MD_CTX_copy_ex(sha1_ctx, ctx_opad);
+		EVP_DigestUpdate(sha1_ctx, buffer, 20);
+		EVP_DigestFinal_ex(sha1_ctx, buffer, NULL);
+
+		for (j = 0; j < 20; j++) pmk[j + 20] ^= buffer[j];
+	}
+
+	EVP_MD_CTX_free(ctx_ipad);
+	EVP_MD_CTX_free(ctx_opad);
+	EVP_MD_CTX_free(sha1_ctx);
+
+	#else
+	/* Legacy implementation for OpenSSL < 3.0 */
+	SHA_CTX ctx_ipad;
+	SHA_CTX ctx_opad;
+	SHA_CTX sha1_ctx;
+
 	for (i = 0; i < 64; i++) buffer[i] ^= 0x36;
 
 	SHA1_Init(&ctx_ipad);
@@ -137,17 +242,10 @@ void calc_pmk(char * key, char * essid_pre, unsigned char pmk[static 40])
 	SHA1_Init(&ctx_opad);
 	SHA1_Update(&ctx_opad, buffer, 64);
 
-	/* iterate HMAC-SHA1 over itself 8192 times */
-
 	essid[slen - 1] = '\1';
-	HMAC(EVP_sha1(),
-		 (unsigned char *) key,
-		 (int) strlen(key),
-		 (unsigned char *) essid,
-		 (size_t) slen,
-		 pmk,
-		 NULL);
-	memcpy(buffer, pmk, 20); //-V512
+	HMAC(EVP_sha1(), (unsigned char *) key, (int) strlen(key),
+		 (unsigned char *) essid, (size_t) slen, pmk, NULL);
+	memcpy(buffer, pmk, 20);
 
 	for (i = 1; i < 4096; i++)
 	{
@@ -163,13 +261,8 @@ void calc_pmk(char * key, char * essid_pre, unsigned char pmk[static 40])
 	}
 
 	essid[slen - 1] = '\2';
-	HMAC(EVP_sha1(),
-		 (unsigned char *) key,
-		 (int) strlen(key),
-		 (unsigned char *) essid,
-		 (size_t) slen,
-		 pmk + 20,
-		 NULL);
+	HMAC(EVP_sha1(), (unsigned char *) key, (int) strlen(key),
+		 (unsigned char *) essid, (size_t) slen, pmk + 20, NULL);
 	memcpy(buffer, pmk + 20, 20);
 
 	for (i = 1; i < 4096; i++)
@@ -184,6 +277,7 @@ void calc_pmk(char * key, char * essid_pre, unsigned char pmk[static 40])
 
 		for (j = 0; j < 20; j++) pmk[j + 20] ^= buffer[j];
 	}
+	#endif
 }
 
 void calc_mic(struct AP_info * ap,
@@ -195,16 +289,6 @@ void calc_mic(struct AP_info * ap,
 
 	int i;
 	unsigned char pke[100];
-#if defined(USE_GCRYPT) || OPENSSL_VERSION_NUMBER < 0x10100000L                \
-	|| (defined(LIBRESSL_VERSION_NUMBER) && LIBRESSL_VERSION_NUMBER < 0x30500000L)
-#define HMAC_USE_NO_PTR
-#endif
-
-#ifdef HMAC_USE_NO_PTR
-	HMAC_CTX ctx = {0};
-#else
-	HMAC_CTX * ctx;
-#endif
 
 	memcpy(pke, "Pairwise key expansion", 23);
 
@@ -230,39 +314,72 @@ void calc_mic(struct AP_info * ap,
 		memcpy(pke + 67, ap->wpa.snonce, 32);
 	}
 
-#ifdef HMAC_USE_NO_PTR
-	HMAC_CTX_init(&ctx);
-	HMAC_Init_ex(&ctx, pmk, 32, EVP_sha1(), NULL);
+	#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+	/* OpenSSL 3.0+ Implementation */
+	EVP_MAC *mac = EVP_MAC_fetch(NULL, "HMAC", NULL);
+	EVP_MAC_CTX *ctx = EVP_MAC_CTX_new(mac);
+	OSSL_PARAM params[2];
+
+	params[0] = OSSL_PARAM_construct_utf8_string("digest", "SHA1", 0);
+	params[1] = OSSL_PARAM_construct_end();
+
 	for (i = 0; i < 4; i++)
 	{
 		pke[99] = (uint8_t) i;
-		HMAC_Init_ex(&ctx, 0, 0, 0, 0);
-		HMAC_Update(&ctx, pke, 100);
-		HMAC_Final(&ctx, ptk + i * 20, NULL);
+		EVP_MAC_init(ctx, pmk, 32, params);
+		EVP_MAC_update(ctx, pke, 100);
+		EVP_MAC_final(ctx, ptk + i * 20, NULL, 20);
 	}
-	HMAC_CTX_cleanup(&ctx);
-#else
-	ctx = HMAC_CTX_new();
-	HMAC_Init_ex(ctx, pmk, 32, EVP_sha1(), NULL);
+
+	EVP_MAC_CTX_free(ctx);
+
+	/* Calculate EAPOL MIC */
+	ctx = EVP_MAC_CTX_new(mac);
+	params[0] = OSSL_PARAM_construct_utf8_string("digest", (ap->wpa.keyver == 1) ? "MD5" : "SHA1", 0);
+
+	EVP_MAC_init(ctx, ptk, 16, params);
+	EVP_MAC_update(ctx, ap->wpa.eapol, ap->wpa.eapol_size);
+	EVP_MAC_final(ctx, mic, NULL, 20);
+
+	EVP_MAC_CTX_free(ctx);
+	EVP_MAC_free(mac);
+	#else
+	/* Legacy Implementation */
+	#if defined(USE_GCRYPT) || OPENSSL_VERSION_NUMBER < 0x10100000L                \
+	|| (defined(LIBRESSL_VERSION_NUMBER) && LIBRESSL_VERSION_NUMBER < 0x30500000L)
+	#define HMAC_USE_NO_PTR
+	#endif
+
+	#ifdef HMAC_USE_NO_PTR
+	HMAC_CTX ctx_legacy = {0};
+	HMAC_CTX_init(&ctx_legacy);
+	HMAC_Init_ex(&ctx_legacy, pmk, 32, EVP_sha1(), NULL);
+	for (i = 0; i < 4; i++)
+	{
+		pke[99] = (uint8_t) i;
+		HMAC_Init_ex(&ctx_legacy, 0, 0, 0, 0);
+		HMAC_Update(&ctx_legacy, pke, 100);
+		HMAC_Final(&ctx_legacy, ptk + i * 20, NULL);
+	}
+	HMAC_CTX_cleanup(&ctx_legacy);
+	#else
+	HMAC_CTX * ctx_legacy = HMAC_CTX_new();
+	HMAC_Init_ex(ctx_legacy, pmk, 32, EVP_sha1(), NULL);
 	for (i = 0; i < 4; i++)
 	{
 		pke[99] = i;
-		HMAC_Init_ex(ctx, 0, 0, 0, 0);
-		HMAC_Update(ctx, pke, 100);
-		HMAC_Final(ctx, ptk + i * 20, NULL);
+		HMAC_Init_ex(ctx_legacy, 0, 0, 0, 0);
+		HMAC_Update(ctx_legacy, pke, 100);
+		HMAC_Final(ctx_legacy, ptk + i * 20, NULL);
 	}
-	HMAC_CTX_free(ctx);
-#endif
-#undef HMAC_USE_NO_PTR
+	HMAC_CTX_free(ctx_legacy);
+	#endif
 
 	if (ap->wpa.keyver == 1)
-	{
 		HMAC(EVP_md5(), ptk, 16, ap->wpa.eapol, ap->wpa.eapol_size, mic, NULL);
-	}
 	else
-	{
 		HMAC(EVP_sha1(), ptk, 16, ap->wpa.eapol, ap->wpa.eapol_size, mic, NULL);
-	}
+	#endif
 }
 
 static inline unsigned long calc_crc(const unsigned char * buf, int len)
@@ -1319,9 +1436,7 @@ int encrypt_ccmp(unsigned char * h80211,
 	int data_len, last, offset;
 	unsigned char B0[16], B[16], MIC[16];
 	unsigned char AAD[32];
-	AES_KEY aes_ctx;
-
-	memset(&aes_ctx, 0, sizeof(aes_ctx));
+	int outlen;
 
 	is_a4 = (h80211[1] & 3) == 3;
 	is_qos = (h80211[0] & 0x8C) == 0x88;
@@ -1332,8 +1447,8 @@ int encrypt_ccmp(unsigned char * h80211,
 	memmove(h80211 + z + 8, h80211 + z, (size_t) caplen - z);
 	h80211[z + 0] = PN[5];
 	h80211[z + 1] = PN[4];
-	h80211[z + 2] = 0x00; // Reserved -> 0
-	h80211[z + 3] = 0x20; // ExtIV=1, KeyID=0
+	h80211[z + 2] = 0x00;
+	h80211[z + 3] = 0x20;
 	h80211[z + 4] = PN[3];
 	h80211[z + 5] = PN[2];
 	h80211[z + 6] = PN[1];
@@ -1341,76 +1456,68 @@ int encrypt_ccmp(unsigned char * h80211,
 
 	data_len = caplen - z;
 
-	// B_0 := B0
-	B0[0] = 0x59; // Flags
-	B0[1] = 0; // Nonce := CCM Nonce: - Nonce flags
-	memcpy(B0 + 2, h80211 + 10, 6); //                     - A2
-	memcpy(B0 + 8, PN, 6); //                     - PN
-	B0[14] = (uint8_t)((data_len >> 8) & 0xFF); // l(m)
-	B0[15] = (uint8_t)(data_len & 0xFF); // l(m)
+	B0[0] = 0x59;
+	B0[1] = 0;
+	memcpy(B0 + 2, h80211 + 10, 6);
+	memcpy(B0 + 8, PN, 6);
+	B0[14] = (uint8_t)((data_len >> 8) & 0xFF);
+	B0[15] = (uint8_t)(data_len & 0xFF);
 
-	// B_1 := AAD[ 0..15]
-	// B_2 := AAD[16..31]
-	//        AAD[ 0.. 1] = l(a)
-	//        AAD[ 2..31] = a
 	memset(AAD, 0, sizeof(AAD));
-	AAD[2] = (uint8_t)(h80211[0] & 0x8F); // AAD[2..3]  = FC
-	AAD[3] = (uint8_t)(h80211[1] & 0xC7); //
-	memcpy(AAD + 4, h80211 + 4, 3 * 6); // AAD[4..21] = [A1,A2,A3]
-	AAD[22] = (uint8_t)(h80211[22] & 0x0F); // AAD[22]    = SC
+	AAD[2] = (uint8_t)(h80211[0] & 0x8F);
+	AAD[3] = (uint8_t)(h80211[1] & 0xC7);
+	memcpy(AAD + 4, h80211 + 4, 3 * 6);
+	AAD[22] = (uint8_t)(h80211[22] & 0x0F);
 
 	if (is_a4)
 	{
-		memcpy(AAD + 24, h80211 + 24, 6); // AAD[24..29] = A4
-
+		memcpy(AAD + 24, h80211 + 24, 6);
 		if (is_qos)
 		{
-			AAD[30] = (uint8_t)(h80211[z - 2] & 0x0F); // AAD[30..31] = QC
-			AAD[31] = 0; //
-			B0[1] = AAD[30]; //  B0[     1] = CCM Nonce flags
-			AAD[1] = 22 + 2 + 6; // AAD[ 0.. 1] = l(a)
+			AAD[30] = (uint8_t)(h80211[z - 2] & 0x0F);
+			AAD[31] = 0;
+			B0[1] = AAD[30];
+			AAD[1] = 22 + 2 + 6;
 		}
 		else
 		{
-			memset(&AAD[30], 0, 2); // AAD[30..31] = QC
-			B0[1] = 0; //  B0[     1] = CCM Nonce flags
-			AAD[1] = 22 + 6; // AAD[ 0.. 1] = l(a)
+			memset(&AAD[30], 0, 2);
+			B0[1] = 0;
+			AAD[1] = 22 + 6;
 		}
 	}
 	else
 	{
 		if (is_qos)
 		{
-			AAD[24] = (uint8_t)(h80211[z - 2] & 0x0F); // AAD[24..25] = QC
-			AAD[25] = 0; //
-			B0[1] = AAD[24]; //  B0[     1] = CCM Nonce flags
-			AAD[1] = 22 + 2; // AAD[ 0.. 1] = l(a)
+			AAD[24] = (uint8_t)(h80211[z - 2] & 0x0F);
+			AAD[25] = 0;
+			B0[1] = AAD[24];
+			AAD[1] = 22 + 2;
 		}
 		else
 		{
-			memset(&AAD[24], 0, 2); // AAD[24..25] = QC
-			B0[1] = 0; //  B0[     1] = CCM Nonce flags
-			AAD[1] = 22; // AAD[ 0.. 1] = l(a)
+			memset(&AAD[24], 0, 2);
+			B0[1] = 0;
+			AAD[1] = 22;
 		}
 	}
 
-	AES_set_encrypt_key(TK1, 128, &aes_ctx);
-	AES_encrypt(B0, MIC, &aes_ctx); // X_1 := E( K, B_0 )
-	XOR(MIC, AAD, 16); // X_2 := E( K, X_1 XOR B_1 )
-	AES_encrypt(MIC, MIC, &aes_ctx); //
-	XOR(MIC, AAD + 16, 16); // X_3 := E( K, X_2 XOR B_2 )
-	AES_encrypt(MIC, MIC, &aes_ctx); //
+	#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+	EVP_CIPHER_CTX *aes_ctx = EVP_CIPHER_CTX_new();
+	EVP_EncryptInit_ex(aes_ctx, EVP_aes_128_ecb(), NULL, TK1, NULL);
+	EVP_CIPHER_CTX_set_padding(aes_ctx, 0);
 
-	// A_i := B0
-	//        B0[     0] = Flags
-	//        B0[ 1..13] = Nonce := CCM Nonce
-	//        B0[14..15] = i
+	EVP_EncryptUpdate(aes_ctx, MIC, &outlen, B0, 16);
+	XOR(MIC, AAD, 16);
+	EVP_EncryptUpdate(aes_ctx, MIC, &outlen, MIC, 16);
+	XOR(MIC, AAD + 16, 16);
+	EVP_EncryptUpdate(aes_ctx, MIC, &outlen, MIC, 16);
+
 	B0[0] &= 0x07;
 	B0[14] = B0[15] = 0;
-	AES_encrypt(B0, B, &aes_ctx); // S_0 := E( K, A_i )
-	memcpy(h80211 + z + 8 + data_len, B, 8); //-V512
-	//      ^^^^^^^^^^^^^^^^^^^  ^
-	//      S_0[0..7]/future U   S_0
+	EVP_EncryptUpdate(aes_ctx, B, &outlen, B0, 16);
+	memcpy(h80211 + z + 8 + data_len, B, 8);
 
 	blocks = (data_len + 16 - 1) / 16;
 	last = data_len % 16;
@@ -1419,31 +1526,47 @@ int encrypt_ccmp(unsigned char * h80211,
 	for (i = 1; i <= blocks; i++)
 	{
 		int n = (last > 0 && i == blocks) ? last : 16;
-
-		XOR(MIC, h80211 + offset, n); // X_i+3 := E( K, X_i+2 XOR B_i+2 )
-		AES_encrypt(MIC, MIC, &aes_ctx); //
-		//    (X_i+2 ^^^)(^^^ X_i+3)
-
-		// The message is encrypted by XORing the octets of message m with the
-		// first l(m) octets of the concatenation of S_1, S_2, S_3, ... .
-		B0[14] = (uint8_t)((i >> 8) & 0xFF); // A_i[14..15] = i
-		B0[15] = (uint8_t)(i & 0xFF); //
-		AES_encrypt(B0, B, &aes_ctx); // S_i := E( K, A_i )
+		XOR(MIC, h80211 + offset, n);
+		EVP_EncryptUpdate(aes_ctx, MIC, &outlen, MIC, 16);
+		B0[14] = (uint8_t)((i >> 8) & 0xFF);
+		B0[15] = (uint8_t)(i & 0xFF);
+		EVP_EncryptUpdate(aes_ctx, B, &outlen, B0, 16);
 		XOR(h80211 + offset, B, n);
-		// [B_3, ..., B_n] := m
-
 		offset += n;
 	}
+	EVP_CIPHER_CTX_free(aes_ctx);
+	#else
+	AES_KEY aes_key;
+	AES_set_encrypt_key(TK1, 128, &aes_key);
+	AES_encrypt(B0, MIC, &aes_key);
+	XOR(MIC, AAD, 16);
+	AES_encrypt(MIC, MIC, &aes_key);
+	XOR(MIC, AAD + 16, 16);
+	AES_encrypt(MIC, MIC, &aes_key);
 
-// We need to free the ctx when using gcrypt to avoid memory leaks
-#ifdef USE_GCRYPT
-	gcry_cipher_close(aes_ctx);
-#endif
+	B0[0] &= 0x07;
+	B0[14] = B0[15] = 0;
+	AES_encrypt(B0, B, &aes_key);
+	memcpy(h80211 + z + 8 + data_len, B, 8);
 
-	// T :=     X_i+3[ 0.. 7]
-	// U := T XOR S_0[ 0.. 7]
+	blocks = (data_len + 16 - 1) / 16;
+	last = data_len % 16;
+	offset = z + 8;
+
+	for (i = 1; i <= blocks; i++)
+	{
+		int n = (last > 0 && i == blocks) ? last : 16;
+		XOR(MIC, h80211 + offset, n);
+		AES_encrypt(MIC, MIC, &aes_key);
+		B0[14] = (uint8_t)((i >> 8) & 0xFF);
+		B0[15] = (uint8_t)(i & 0xFF);
+		AES_encrypt(B0, B, &aes_key);
+		XOR(h80211 + offset, B, n);
+		offset += n;
+	}
+	#endif
+
 	XOR(h80211 + offset, MIC, 8);
-
 	return (z + 8 + data_len + 8);
 }
 
@@ -1457,9 +1580,7 @@ int decrypt_ccmp(unsigned char * h80211,
 	int data_len, last, offset;
 	unsigned char B0[16], B[16], MIC[16];
 	unsigned char PN[6], AAD[32];
-	AES_KEY aes_ctx;
-
-	memset(&aes_ctx, 0, sizeof(aes_ctx));
+	int outlen;
 
 	is_a4 = (h80211[1] & 3) == 3;
 	is_qos = (h80211[0] & 0x8C) == 0x88;
@@ -1477,74 +1598,68 @@ int decrypt_ccmp(unsigned char * h80211,
 
 	// B_0 := B0
 	B0[0] = 0x59; // Flags
-	B0[1] = 0; // Nonce := CCM Nonce: - Nonce flags
-	memcpy(B0 + 2, h80211 + 10, 6); //                     - A2
-	memcpy(B0 + 8, PN, 6); //                     - PN
-	B0[14] = (uint8_t)((data_len >> 8) & 0xFF); // l(m)
-	B0[15] = (uint8_t)(data_len & 0xFF); // l(m)
+	B0[1] = 0; // Nonce := CCM Nonce
+	memcpy(B0 + 2, h80211 + 10, 6);
+	memcpy(B0 + 8, PN, 6);
+	B0[14] = (uint8_t)((data_len >> 8) & 0xFF);
+	B0[15] = (uint8_t)(data_len & 0xFF);
 
-	// B_1 := AAD[ 0..15]
-	// B_2 := AAD[16..31]
-	//        AAD[ 0.. 1] = l(a)
-	//        AAD[ 2..31] = a
 	memset(AAD, 0, sizeof(AAD));
-	AAD[2] = (uint8_t)(h80211[0] & 0x8F); // AAD[2..3]  = FC
-	AAD[3] = (uint8_t)(h80211[1] & 0xC7); //
-	memcpy(AAD + 4, h80211 + 4, 3 * 6); // AAD[4..21] = [A1,A2,A3]
-	AAD[22] = (uint8_t)(h80211[22] & 0x0F); // AAD[22]    = SC
+	AAD[2] = (uint8_t)(h80211[0] & 0x8F);
+	AAD[3] = (uint8_t)(h80211[1] & 0xC7);
+	memcpy(AAD + 4, h80211 + 4, 3 * 6);
+	AAD[22] = (uint8_t)(h80211[22] & 0x0F);
 
 	if (is_a4)
 	{
-		memcpy(AAD + 24, h80211 + 24, 6); // AAD[24..29] = A4
-
+		memcpy(AAD + 24, h80211 + 24, 6);
 		if (is_qos)
 		{
-			AAD[30] = (uint8_t)(h80211[z - 2] & 0x0F); // AAD[30..31] = QC
-			AAD[31] = 0; //
-			B0[1] = AAD[30]; //  B0[     1] = CCM Nonce flags
-			AAD[1] = 22 + 2 + 6; // AAD[ 0.. 1] = l(a)
+			AAD[30] = (uint8_t)(h80211[z - 2] & 0x0F);
+			AAD[31] = 0;
+			B0[1] = AAD[30];
+			AAD[1] = 22 + 2 + 6;
 		}
 		else
 		{
-			memset(&AAD[30], 0, 2); // AAD[30..31] = QC
-			B0[1] = 0; //  B0[     1] = CCM Nonce flags
-			AAD[1] = 22 + 6; // AAD[ 0.. 1] = l(a)
+			memset(&AAD[30], 0, 2);
+			B0[1] = 0;
+			AAD[1] = 22 + 6;
 		}
 	}
 	else
 	{
 		if (is_qos)
 		{
-			AAD[24] = (uint8_t)(h80211[z - 2] & 0x0F); // AAD[24..25] = QC
-			AAD[25] = 0; //
-			B0[1] = AAD[24]; //  B0[     1] = CCM Nonce flags
-			AAD[1] = 22 + 2; // AAD[ 0.. 1] = l(a)
+			AAD[24] = (uint8_t)(h80211[z - 2] & 0x0F);
+			AAD[25] = 0;
+			B0[1] = AAD[24];
+			AAD[1] = 22 + 2;
 		}
 		else
 		{
-			memset(&AAD[24], 0, 2); // AAD[24..25] = QC
-			B0[1] = 0; //  B0[     1] = CCM Nonce flags
-			AAD[1] = 22; // AAD[ 0.. 1] = l(a)
+			memset(&AAD[24], 0, 2);
+			B0[1] = 0;
+			AAD[1] = 22;
 		}
 	}
 
-	AES_set_encrypt_key(TK1, 128, &aes_ctx);
-	AES_encrypt(B0, MIC, &aes_ctx); // X_1 := E( K, B_0 )
-	XOR(MIC, AAD, 16); // X_2 := E( K, X_1 XOR B_1 )
-	AES_encrypt(MIC, MIC, &aes_ctx); //
-	XOR(MIC, AAD + 16, 16); // X_3 := E( K, X_2 XOR B_2 )
-	AES_encrypt(MIC, MIC, &aes_ctx); //
+	#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+	/* OpenSSL 3.0+ Implementation using EVP */
+	EVP_CIPHER_CTX *aes_ctx = EVP_CIPHER_CTX_new();
+	EVP_EncryptInit_ex(aes_ctx, EVP_aes_128_ecb(), NULL, TK1, NULL);
+	EVP_CIPHER_CTX_set_padding(aes_ctx, 0);
 
-	// A_i := B0
-	//        B0[     0] = Flags
-	//        B0[ 1..13] = Nonce := CCM Nonce
-	//        B0[14..15] = i
+	EVP_EncryptUpdate(aes_ctx, MIC, &outlen, B0, 16);
+	XOR(MIC, AAD, 16);
+	EVP_EncryptUpdate(aes_ctx, MIC, &outlen, MIC, 16);
+	XOR(MIC, AAD + 16, 16);
+	EVP_EncryptUpdate(aes_ctx, MIC, &outlen, MIC, 16);
+
 	B0[0] &= 0x07;
 	B0[14] = B0[15] = 0;
-	AES_encrypt(B0, B, &aes_ctx); // S_0 := E( K, A_i )
-	XOR(h80211 + caplen - 8, B, 8); // T   := U XOR S_0[0..7]
-	//   ^^^^^^^^^^^^^^^      ^
-	//     U:=MIC -> T       S_0
+	EVP_EncryptUpdate(aes_ctx, B, &outlen, B0, 16);
+	XOR(h80211 + caplen - 8, B, 8);
 
 	blocks = (data_len + 16 - 1) / 16;
 	last = data_len % 16;
@@ -1553,29 +1668,50 @@ int decrypt_ccmp(unsigned char * h80211,
 	for (i = 1; i <= blocks; i++)
 	{
 		int n = (last > 0 && i == blocks) ? last : 16;
+		B0[14] = (uint8_t)((i >> 8) & 0xFF);
+		B0[15] = (uint8_t)(i & 0xFF);
 
-		B0[14] = (uint8_t)((i >> 8) & 0xFF); // A_i[14..15] = i
-		B0[15] = (uint8_t)(i & 0xFF); //
-
-		AES_encrypt(B0, B, &aes_ctx); // S_i := E( K, A_i )
-		// The message is encrypted by XORing the octets of message m with the
-		// first l(m) octets of the concatenation of S_1, S_2, S_3, ... .
+		EVP_EncryptUpdate(aes_ctx, B, &outlen, B0, 16);
 		XOR(h80211 + offset, B, n);
-		// [B_3, ..., B_n] := m
-		XOR(MIC, h80211 + offset, n); // X_i+3 := E( K, X_i+2 XOR B_i+2 )
-		AES_encrypt(MIC, MIC, &aes_ctx); //
-		//    (X_i+2 ^^^)(^^^ X_i+3)
+		XOR(MIC, h80211 + offset, n);
+		EVP_EncryptUpdate(aes_ctx, MIC, &outlen, MIC, 16);
 
 		offset += n;
 	}
+	EVP_CIPHER_CTX_free(aes_ctx);
+	#else
+	/* Legacy Implementation */
+	AES_KEY aes_key_legacy;
+	AES_set_encrypt_key(TK1, 128, &aes_key_legacy);
+	AES_encrypt(B0, MIC, &aes_key_legacy);
+	XOR(MIC, AAD, 16);
+	AES_encrypt(MIC, MIC, &aes_key_legacy);
+	XOR(MIC, AAD + 16, 16);
+	AES_encrypt(MIC, MIC, &aes_key_legacy);
 
-// We need to free the ctx when using gcrypt to avoid memory leaks
-#ifdef USE_GCRYPT
-	gcry_cipher_close(aes_ctx);
-#endif
+	B0[0] &= 0x07;
+	B0[14] = B0[15] = 0;
+	AES_encrypt(B0, B, &aes_key_legacy);
+	XOR(h80211 + caplen - 8, B, 8);
 
-	// T := X_n[ 0.. 7]
-	// Note: Decryption is successful if calculated T is the same as the one
-	//       that was sent with the message.
-	return (memcmp(h80211 + offset, MIC, 8) == 0); //-V512
+	blocks = (data_len + 16 - 1) / 16;
+	last = data_len % 16;
+	offset = z + 8;
+
+	for (i = 1; i <= blocks; i++)
+	{
+		int n = (last > 0 && i == blocks) ? last : 16;
+		B0[14] = (uint8_t)((i >> 8) & 0xFF);
+		B0[15] = (uint8_t)(i & 0xFF);
+
+		AES_encrypt(B0, B, &aes_key_legacy);
+		XOR(h80211 + offset, B, n);
+		XOR(MIC, h80211 + offset, n);
+		AES_encrypt(MIC, MIC, &aes_key_legacy);
+
+		offset += n;
+	}
+	#endif
+
+	return (memcmp(h80211 + offset, MIC, 8) == 0);
 }
