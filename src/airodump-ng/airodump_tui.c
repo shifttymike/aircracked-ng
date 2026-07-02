@@ -264,16 +264,28 @@ static void render_ap_header_row(int y,
 	char line[1024];
 	size_t used = 0;
 
-	used += snprintf(line + used,
-					 sizeof(line) - used,
-					 " BSSID              PWR  Beacons    #Data, #/s  CH   MB   ENC CIPHER  AUTH");
-	if (view->show_uptime)
-		used += snprintf(line + used, sizeof(line) - used, "   UPTIME");
-	if (view->show_wps)
-		used += snprintf(line + used, sizeof(line) - used, "  WPS");
-	if (view->show_manufacturer)
-		used += snprintf(line + used, sizeof(line) - used, "  MANUFACTURER");
-	used += snprintf(line + used, sizeof(line) - used, "  ESSID");
+	line[0] = ' ';
+	used = snprintf(line + 1,
+					sizeof(line) - 1,
+					" %-17s  %3s  %8s  %8s  %4s  %3s  %4s  %-4s %-7s %-4s",
+					"BSSID",
+					"PWR",
+					"Beacons",
+					"#Data",
+					"#/s",
+					"CH",
+					"MB",
+					"ENC",
+					"CIPHER",
+					"AUTH");
+	if (view->show_uptime && used < sizeof(line) - 1)
+		used += snprintf(line + 1 + used, sizeof(line) - 1 - used, " %14s", "UPTIME");
+	if (view->show_wps && used < sizeof(line) - 1)
+		used += snprintf(line + 1 + used, sizeof(line) - 1 - used, "  %-4s", "WPS");
+	if (view->show_manufacturer && used < sizeof(line) - 1)
+		used += snprintf(line + 1 + used, sizeof(line) - 1 - used, "  %-12s", "MANUFACTURER");
+	if (used < sizeof(line) - 1)
+		used += snprintf(line + 1 + used, sizeof(line) - 1 - used, "  %s", "ESSID");
 
 	if (width < 1) width = 1;
 	if (width > (int) sizeof(line) - 1) width = (int) sizeof(line) - 1;
@@ -299,15 +311,20 @@ static void render_station_header_row(int y, int x, int width)
 	attroff(A_BOLD);
 }
 
-static void render_message_row(int y, int x, int width, const struct airodump_tui_message_entry * entry)
+static int render_message_row(int y,
+							  int x,
+							  int width,
+							  int max_rows,
+							  const struct airodump_tui_message_entry * entry)
 {
-	char line[1024];
 	char ts[32];
 	struct tm * lt;
-	int used;
+	int prefix_len;
+	int rows_used = 0;
+	const char * cursor;
 
 	if (width < 1) width = 1;
-	if (width > (int) sizeof(line) - 1) width = (int) sizeof(line) - 1;
+	if (max_rows < 1) return (0);
 
 	lt = localtime(&(entry->timestamp));
 	if (lt != NULL)
@@ -320,12 +337,65 @@ static void render_message_row(int y, int x, int width, const struct airodump_tu
 		strlcpy(ts, "--:--:--", sizeof(ts));
 	}
 
-	used = snprintf(line, sizeof(line), "%s %s", ts, entry->text);
-	if (used < 0) used = 0;
-	if (used > width) used = width;
-	line[used] = '\0';
-	mvaddnstr(y, x, line, used);
-	fill_inner_width(y, x + used, width - used);
+	prefix_len = (int) strlen(ts) + 1;
+	if (width <= prefix_len)
+	{
+		mvaddnstr(y, x, ts, width);
+		fill_inner_width(y, x + width, 0);
+		return (1);
+	}
+
+	cursor = entry->text;
+	while (*cursor != '\0' && rows_used < max_rows)
+	{
+		int available = width - prefix_len;
+		int segment_len = 0;
+		int last_space = -1;
+		const char * segment = cursor;
+
+		while (*segment == ' ')
+			segment++;
+		if (*segment == '\0')
+			break;
+
+		if (rows_used == 0)
+			mvaddnstr(y + rows_used, x, ts, (int) strlen(ts));
+		else
+			fill_inner_width(y + rows_used, x, prefix_len - 1);
+		mvaddch(y + rows_used, x + prefix_len - 1, ' ');
+
+		if (available < 1)
+			available = 1;
+
+		while (segment[segment_len] != '\0' && segment_len < available)
+		{
+			if (segment[segment_len] == ' ')
+				last_space = segment_len;
+			segment_len++;
+		}
+
+		if (segment[segment_len] != '\0' && last_space > 0 && last_space < segment_len)
+			segment_len = last_space;
+		if (segment_len < 1)
+			segment_len = 1;
+
+		mvaddnstr(y + rows_used, x + prefix_len, segment, segment_len);
+		fill_inner_width(y + rows_used, x + prefix_len + segment_len, width - prefix_len - segment_len);
+
+		cursor = segment + segment_len;
+		while (*cursor == ' ')
+			cursor++;
+		rows_used++;
+	}
+
+	if (rows_used == 0)
+	{
+		mvaddnstr(y, x, ts, (int) strlen(ts));
+		fill_inner_width(y, x + (int) strlen(ts), width - (int) strlen(ts));
+		rows_used = 1;
+	}
+
+	return (rows_used);
 }
 
 static void draw_padded_line(int y, int x, int width, const char * fmt, ...)
@@ -448,6 +518,117 @@ static void render_ap_row(int y,
 
 	if (selected)
 		attroff(A_BOLD);
+}
+
+static size_t measure_ap_row_width(const struct AP_info * ap,
+								   int selected,
+								   const struct airodump_tui_view * view)
+{
+	char line[1024];
+	char cipher[32];
+	char auth[32];
+	const char * std;
+
+	security_cipher_string(cipher, sizeof(cipher), ap->security);
+	security_auth_string(auth, sizeof(auth), ap->security);
+	std = security_std_string(ap->security);
+
+	line[0] = selected ? '>' : ' ';
+	snprintf(line + 1,
+			 sizeof(line) - 1,
+			 " %02X:%02X:%02X:%02X:%02X:%02X  %3d  %8lu  %8lu  %4d  %3d  %4d  %-4s %-7s %-4s ",
+			 ap->bssid[0],
+			 ap->bssid[1],
+			 ap->bssid[2],
+			 ap->bssid[3],
+			 ap->bssid[4],
+			 ap->bssid[5],
+			 ap->avg_power,
+			 ap->nb_bcn,
+			 ap->nb_data,
+			 ap->nb_dataps,
+			 ap->channel,
+			 ap->max_speed,
+			 std,
+			 cipher,
+			 auth);
+
+	if (view->show_uptime && strlen(line) < sizeof(line) - 32)
+	{
+		size_t used = strlen(line);
+		snprintf(line + used, sizeof(line) - used, " %14llu", ap->timestamp);
+	}
+
+	if (view->show_wps && strlen(line) < sizeof(line) - 32)
+	{
+		size_t used = strlen(line);
+		if (ap->wps.state != 0xFF)
+		{
+			if (ap->wps.ap_setup_locked)
+				snprintf(line + used, sizeof(line) - used, " Locked");
+			else
+				snprintf(line + used, sizeof(line) - used, " WPS %u.%u",
+						 ap->wps.version >> 4,
+						 ap->wps.version & 0xF);
+		}
+	}
+
+	if (view->show_manufacturer && ap->manuf != NULL
+		&& strlen(line) < sizeof(line) - 32)
+	{
+		size_t used = strlen(line);
+		snprintf(line + used, sizeof(line) - used, " %s", ap->manuf);
+	}
+
+	if (ap->essid[0] != 0x00 && strlen(line) < sizeof(line) - 4)
+	{
+		size_t used = strlen(line);
+		snprintf(line + used, sizeof(line) - used, " %s", ap->essid);
+	}
+	else if (memcmp(ap->bssid, BROADCAST, 6) == 0 && strlen(line) < sizeof(line) - 24)
+	{
+		size_t used = strlen(line);
+		snprintf(line + used, sizeof(line) - used, " (unassociated clients)");
+	}
+	else if (strlen(line) < sizeof(line) - 16)
+	{
+		size_t used = strlen(line);
+		snprintf(line + used, sizeof(line) - used, " <length:%d>",
+				 ap->ssid_length);
+	}
+
+	return (strlen(line));
+}
+
+static size_t measure_ap_header_width(const struct airodump_tui_view * view)
+{
+	char line[1024];
+	size_t used = 0;
+
+	line[0] = ' ';
+	used = snprintf(line + 1,
+					sizeof(line) - 1,
+					" %-17s  %3s  %8s  %8s  %4s  %3s  %4s  %-4s %-7s %-4s",
+					"BSSID",
+					"PWR",
+					"Beacons",
+					"#Data",
+					"#/s",
+					"CH",
+					"MB",
+					"ENC",
+					"CIPHER",
+					"AUTH");
+	if (view->show_uptime && used < sizeof(line) - 1)
+		used += snprintf(line + 1 + used, sizeof(line) - 1 - used, " %14s", "UPTIME");
+	if (view->show_wps && used < sizeof(line) - 1)
+		used += snprintf(line + 1 + used, sizeof(line) - 1 - used, "  %-4s", "WPS");
+	if (view->show_manufacturer && used < sizeof(line) - 1)
+		used += snprintf(line + 1 + used, sizeof(line) - 1 - used, "  %-12s", "MANUFACTURER");
+	if (used < sizeof(line) - 1)
+		used += snprintf(line + 1 + used, sizeof(line) - 1 - used, "  %s", "ESSID");
+
+	return (strlen(line));
 }
 
 static void render_station_row(int y,
@@ -713,6 +894,8 @@ static void render_status_line(const struct airodump_tui_state * state,
 
 	strlcat(line, "  c clear AP filter", sizeof(line));
 	strlcat(line, "  d run log_sta", sizeof(line));
+	strlcat(line, "  r resume hop", sizeof(line));
+	strlcat(line, "  R realtime sort", sizeof(line));
 
 	if (view->do_pause)
 		strlcat(line, " paused", sizeof(line));
@@ -785,6 +968,7 @@ int airodump_tui_start(struct airodump_tui_state * state)
 	getmaxyx(stdscr, state->rows, state->cols);
 	state->active = 1;
 	state->focus = 0;
+	state->msg_follow_latest = 1;
 	return (1);
 }
 
@@ -862,20 +1046,7 @@ void airodump_tui_render(struct airodump_tui_state * state,
 		ap_height = 0;
 	}
 	top_height = ap_height;
-
-	if (msg_enabled)
-	{
-		msg_box_width = MAX(28, state->cols / 4);
-		if (msg_box_width > state->cols - 60)
-			msg_box_width = state->cols - 60;
-		if (msg_box_width < 24)
-			msg_enabled = 0;
-	}
-
-	if (msg_enabled)
-		ap_box_width = state->cols - msg_box_width;
-	else
-		ap_box_width = state->cols;
+	ap_box_width = state->cols;
 
 	if (view->show_sta)
 	{
@@ -902,6 +1073,7 @@ void airodump_tui_render(struct airodump_tui_state * state,
 	if (view->show_ap && ap_count > 0)
 	{
 		size_t selected_index = 0;
+		size_t ap_width = measure_ap_header_width(view);
 
 		selected_ap = view->selected_ap;
 		if (selected_ap != NULL)
@@ -915,6 +1087,21 @@ void airodump_tui_render(struct airodump_tui_state * state,
 				}
 			}
 		}
+
+		for (i = 0; i < ap_count; i++)
+		{
+			size_t row_width = measure_ap_row_width(ap_rows[i], ap_rows[i] == selected_ap, view);
+
+			if (row_width > ap_width)
+				ap_width = row_width;
+		}
+		if (ap_width + 2 > (size_t) state->cols)
+			ap_width = (state->cols > 2) ? (size_t) state->cols - 2 : 1;
+		ap_box_width = (int) ap_width + 2;
+		if (msg_enabled && state->cols - ap_box_width < 24)
+			ap_box_width = state->cols - 24;
+		if (ap_box_width < 24)
+			ap_box_width = 24;
 
 		if ((size_t) state->ap_scroll > ap_count - 1)
 			state->ap_scroll = (int) (ap_count - 1);
@@ -961,9 +1148,18 @@ void airodump_tui_render(struct airodump_tui_state * state,
 	}
 	else if (view->show_ap)
 	{
+		size_t ap_width = measure_ap_header_width(view);
+
 		ap_box_top = 1;
 		ap_height = MAX(4, ap_height);
 		ap_box_left = 0;
+		if (ap_width + 2 > (size_t) state->cols)
+			ap_width = (state->cols > 2) ? (size_t) state->cols - 2 : 1;
+		ap_box_width = (int) ap_width + 2;
+		if (msg_enabled && state->cols - ap_box_width < 24)
+			ap_box_width = state->cols - 24;
+		if (ap_box_width < 24)
+			ap_box_width = 24;
 		render_pane_box(ap_box_top, ap_box_left, ap_height, ap_box_width, " Access Points", state->focus == 0);
 		render_ap_header_row(ap_box_top + 1, ap_box_left + 1, ap_box_width - 2, view);
 		draw_padded_line(ap_box_top + 2, ap_box_left + 1, ap_box_width - 2, " No APs match the current filters.");
@@ -977,41 +1173,71 @@ void airodump_tui_render(struct airodump_tui_state * state,
 
 		strlcpy(title, " Messages", sizeof(title));
 
-		msg_box_top = 1;
-		msg_box_left = ap_box_width;
-		render_pane_box(msg_box_top, msg_box_left, top_height, msg_box_width, title, state->focus == 2);
-
-		msg_count = view->message_count;
-		if (msg_count == 0)
+		msg_box_width = state->cols - ap_box_width;
+		if (msg_box_width < 24)
 		{
-			draw_padded_line(msg_box_top + 1, msg_box_left + 1, msg_box_width - 2, " No messages yet.");
+			msg_enabled = 0;
+			msg_box_width = 0;
 		}
 		else
 		{
+			msg_box_top = 1;
+			msg_box_left = ap_box_width;
+			render_pane_box(msg_box_top, msg_box_left, top_height, msg_box_width, title, state->focus == 2);
+		}
+
+		if (msg_enabled)
+		{
+			msg_count = view->message_count;
+			if (msg_count == 0)
+			{
+				draw_padded_line(msg_box_top + 1, msg_box_left + 1, msg_box_width - 2, " No messages yet.");
+			}
+		else
+		{
+			int max_scroll = 0;
+
+			if (msg_count > (size_t) state->msg_visible_rows)
+				max_scroll = MAX(0, (int) msg_count - state->msg_visible_rows);
+
+			if (state->msg_follow_latest)
+				state->msg_scroll = max_scroll;
 			if ((size_t) state->msg_scroll > msg_count - 1)
 				state->msg_scroll = (int) (msg_count - 1);
 			if (state->msg_scroll < 0) state->msg_scroll = 0;
 			if (msg_count <= (size_t) state->msg_visible_rows)
 				state->msg_scroll = 0;
 			else if ((size_t) state->msg_scroll > msg_count - state->msg_visible_rows)
-				state->msg_scroll = MAX(0, (int) msg_count - state->msg_visible_rows);
+				state->msg_scroll = max_scroll;
 
 			msg_start = (size_t) state->msg_scroll;
-			for (i = 0; i < (size_t) state->msg_visible_rows && msg_start + i < msg_count;
-				 ++i)
 			{
-				render_message_row(msg_box_top + 1 + (int) i,
-								   msg_box_left + 1,
-								   msg_box_width - 2,
-								   &(view->messages[msg_start + i]));
+					int msg_y = msg_box_top + 1;
+					int rows_left = state->msg_visible_rows;
+
+					for (i = 0; msg_start + i < msg_count && rows_left > 0; ++i)
+					{
+						int used_rows;
+
+						used_rows = render_message_row(msg_y,
+													   msg_box_left + 1,
+													   msg_box_width - 2,
+													   rows_left,
+													   &(view->messages[msg_start + i]));
+						if (used_rows <= 0)
+							break;
+						msg_y += used_rows;
+						rows_left -= used_rows;
+					}
+				}
+				draw_scrollbar(msg_box_top + 1,
+						   state->msg_visible_rows,
+						   (int) msg_count,
+						   state->msg_scroll,
+						   state->msg_visible_rows,
+						   msg_box_left + msg_box_width - 2,
+						   state->focus == 2);
 			}
-			draw_scrollbar(msg_box_top + 1,
-					   state->msg_visible_rows,
-					   (int) msg_count,
-					   state->msg_scroll,
-					   state->msg_visible_rows,
-					   msg_box_left + msg_box_width - 2,
-					   state->focus == 2);
 		}
 	}
 

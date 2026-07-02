@@ -581,6 +581,7 @@ static char *
 get_manufacturer(unsigned char mac0, unsigned char mac1, unsigned char mac2);
 int is_filtered_essid(const uint8_t * essid);
 static int launch_log_sta(void);
+static int resume_hopper(void);
 static int getchancount(int valid);
 static int getfreqcount(int valid);
 static void channel_hopper(struct wif * wi[], int if_num, int chan_count, pid_t parent);
@@ -593,6 +594,7 @@ static void render_output_view(int record_message_history);
 static void restore_terminal(void);
 static void record_tui_message_history(void);
 static void append_tui_message_history(const char * message, time_t timestamp);
+static void set_message_follow_latest(int follow_latest);
 static int tui_message_pane_visible(void);
 static void set_tui_focus(int focus);
 static void cycle_tui_focus(int direction);
@@ -988,14 +990,8 @@ static int launch_log_sta(void)
 	const char * ifname;
 	int station_count = 0;
 	int i;
-	int saved_channel[MAX_CARDS];
-	int saved_frequency[MAX_CARDS];
-	int restore_channel_mode;
-	int restore_freq_mode;
-	int hopping_was_active;
 	int new_channel;
 	int new_frequency;
-	pid_t child_pid;
 	int status;
 	int launched_any = 0;
 
@@ -1015,6 +1011,7 @@ static int launch_log_sta(void)
 		snprintf(lopt.message,
 				 sizeof(lopt.message),
 				 "][ no wireless interface available");
+		append_tui_message_history(lopt.message, time(NULL));
 		return (0);
 	}
 
@@ -1031,19 +1028,14 @@ static int launch_log_sta(void)
 
 	for (i = 0; i < MAX_CARDS; i++)
 	{
-		saved_channel[i] = lopt.channel[i];
-		saved_frequency[i] = lopt.frequency[i];
 		wi[i] = NULL;
 	}
 	for (i = 0; i < lopt.num_cards; i++)
 		wi[i] = g_wi[i];
 
-	restore_channel_mode = lopt.singlechan;
-	restore_freq_mode = lopt.singlefreq;
-	hopping_was_active = (hopper_pid > 0);
 	new_channel = ap_cur->channel;
 	new_frequency = 0;
-	if (hopping_was_active)
+	if (hopper_pid > 0)
 		stop_hopper();
 
 	if (lopt.freqoption)
@@ -1183,7 +1175,20 @@ static int launch_log_sta(void)
 
 			if (child_pid == 0)
 			{
+				int null_fd;
+
+				setsid();
 				close(pipefd[0]);
+				null_fd = open("/dev/null", O_RDONLY);
+				if (null_fd >= 0)
+				{
+					if (dup2(null_fd, STDIN_FILENO) < 0)
+					{
+						perror("dup2");
+						_exit(127);
+					}
+					close(null_fd);
+				}
 				if (dup2(pipefd[1], STDOUT_FILENO) < 0
 					|| dup2(pipefd[1], STDERR_FILENO) < 0)
 				{
@@ -1286,6 +1291,7 @@ static int launch_log_sta(void)
 		st_cur = st_cur->next;
 	}
 
+restore_state:
 	snprintf(lopt.message,
 			 sizeof(lopt.message),
 			 "][ log_sta complete");
@@ -1297,106 +1303,8 @@ static int launch_log_sta(void)
 		fflush(stdout);
 	}
 
-restore_state:
-	for (i = 0; i < lopt.num_cards; i++)
-	{
-		if (lopt.freqoption)
-		{
-#ifdef CONFIG_LIBNL
-			wi_set_freq_ax(wi[i],
-						   saved_frequency[i],
-						   lopt.ax_bw,
-						   lopt.c_seg0,
-						   lopt.c_seg1);
-#else
-			wi_set_freq(wi[i], saved_frequency[i]);
-#endif
-			lopt.frequency[i] = saved_frequency[i];
-		}
-		else
-		{
-#ifdef CONFIG_LIBNL
-			wi_set_ht_channel(wi[i], saved_channel[i], lopt.htval);
-#else
-			wi_set_channel(wi[i], saved_channel[i]);
-#endif
-			lopt.channel[i] = saved_channel[i];
-		}
-	}
-	lopt.singlechan = restore_channel_mode;
-	lopt.singlefreq = restore_freq_mode;
-
-	if (hopping_was_active)
-	{
-		if (lopt.freqoption && restore_freq_mode == 0)
-		{
-			child_pid = fork();
-			if (child_pid == 0)
-			{
-				int j;
-				char ifnam[64];
-
-				for (j = 0; j < lopt.num_cards; j++)
-				{
-					strlcpy(ifnam, wi_get_ifname(wi[j]), sizeof(ifnam));
-
-					wi_close(wi[j]);
-					wi[j] = wi_open(ifnam);
-					if (!wi[j])
-					{
-						printf("Can't reopen %s\n", ifnam);
-						exit(EXIT_FAILURE);
-					}
-				}
-
-				if (setuid(getuid()) == -1)
-				{
-					perror("setuid");
-				}
-
-				frequency_hopper(wi, lopt.num_cards, getfreqcount(0), main_pid);
-				exit(EXIT_FAILURE);
-			}
-			else if (child_pid > 0)
-			{
-				hopper_pid = child_pid;
-			}
-		}
-		else if (!lopt.freqoption && restore_channel_mode == 0)
-		{
-			child_pid = fork();
-			if (child_pid == 0)
-			{
-				int j;
-				char ifnam[64];
-
-				for (j = 0; j < lopt.num_cards; j++)
-				{
-					strlcpy(ifnam, wi_get_ifname(wi[j]), sizeof(ifnam));
-
-					wi_close(wi[j]);
-					wi[j] = wi_open(ifnam);
-					if (!wi[j])
-					{
-						printf("Can't reopen %s\n", ifnam);
-						exit(EXIT_FAILURE);
-					}
-				}
-
-				if (setuid(getuid()) == -1)
-				{
-					perror("setuid");
-				}
-
-				channel_hopper(wi, lopt.num_cards, getchancount(0), main_pid);
-				exit(EXIT_FAILURE);
-			}
-			else if (child_pid > 0)
-			{
-				hopper_pid = child_pid;
-			}
-		}
-	}
+	lopt.singlechan = lopt.freqoption ? 0 : 1;
+	lopt.singlefreq = lopt.freqoption ? 1 : 0;
 
 	return (launched_any);
 }
@@ -4705,6 +4613,11 @@ static void restore_terminal(void)
 
 }
 
+static void set_message_follow_latest(int follow_latest)
+{
+	tui_state.msg_follow_latest = follow_latest ? 1 : 0;
+}
+
 static int tui_message_pane_visible(void)
 {
 	return (use_ncurses_tui && lopt.show_ap && tui_state.cols >= 90);
@@ -4895,6 +4808,12 @@ static int handle_keycode(int keycode)
 
 	if (keycode == KEY_r)
 	{
+		resume_hopper();
+		redraw = 1;
+	}
+
+	if (keycode == 'R')
+	{
 		lopt.do_sort_always = (lopt.do_sort_always + 1) % 2;
 		if (lopt.do_sort_always)
 			snprintf(lopt.message,
@@ -4945,6 +4864,13 @@ static int handle_keycode(int keycode)
 		else if (!use_ncurses_tui && tui_state.focus == 2)
 		{
 			tui_state.msg_scroll++;
+			if ((size_t) tui_state.msg_scroll
+				>= (tui_message_history_count > (size_t) tui_state.msg_visible_rows
+						? tui_message_history_count - (size_t) tui_state.msg_visible_rows
+						: 0))
+				set_message_follow_latest(1);
+			else
+				set_message_follow_latest(0);
 			redraw = 1;
 		}
 		else if (!use_ncurses_tui && lopt.p_selected_ap && lopt.p_selected_ap->prev)
@@ -4965,6 +4891,7 @@ static int handle_keycode(int keycode)
 		else if (!use_ncurses_tui && tui_state.focus == 2)
 		{
 			if (tui_state.msg_scroll > 0) tui_state.msg_scroll--;
+			set_message_follow_latest(0);
 			redraw = 1;
 		}
 		else if (!use_ncurses_tui && lopt.p_selected_ap && lopt.p_selected_ap->next)
@@ -5122,6 +5049,7 @@ static int handle_keycode(int keycode)
 			else if (tui_state.focus == 2)
 			{
 				if (tui_state.msg_scroll > 0) tui_state.msg_scroll--;
+				set_message_follow_latest(0);
 				redraw = 1;
 			}
 			else if (lopt.p_selected_ap != NULL)
@@ -5157,6 +5085,13 @@ static int handle_keycode(int keycode)
 			else if (tui_state.focus == 2)
 			{
 				tui_state.msg_scroll++;
+				if ((size_t) tui_state.msg_scroll
+					>= (tui_message_history_count > (size_t) tui_state.msg_visible_rows
+							? tui_message_history_count - (size_t) tui_state.msg_visible_rows
+							: 0))
+					set_message_follow_latest(1);
+				else
+					set_message_follow_latest(0);
 				redraw = 1;
 			}
 			else if (lopt.p_selected_ap != NULL)
@@ -5193,6 +5128,7 @@ static int handle_keycode(int keycode)
 			{
 				tui_state.msg_scroll -= MAX(1, tui_state.msg_visible_rows);
 				if (tui_state.msg_scroll < 0) tui_state.msg_scroll = 0;
+				set_message_follow_latest(0);
 			}
 			else
 			{
@@ -5206,7 +5142,16 @@ static int handle_keycode(int keycode)
 			if (tui_state.focus == 1)
 				tui_state.sta_scroll += MAX(1, tui_state.sta_visible_rows);
 			else if (tui_state.focus == 2)
+			{
 				tui_state.msg_scroll += MAX(1, tui_state.msg_visible_rows);
+				if ((size_t) tui_state.msg_scroll
+					>= (tui_message_history_count > (size_t) tui_state.msg_visible_rows
+							? tui_message_history_count - (size_t) tui_state.msg_visible_rows
+							: 0))
+					set_message_follow_latest(1);
+				else
+					set_message_follow_latest(0);
+			}
 			else
 				tui_state.ap_scroll += MAX(1, tui_state.ap_visible_rows);
 			redraw = 1;
@@ -5216,7 +5161,10 @@ static int handle_keycode(int keycode)
 			if (tui_state.focus == 1)
 				tui_state.sta_scroll = 0;
 			else if (tui_state.focus == 2)
+			{
 				tui_state.msg_scroll = 0;
+				set_message_follow_latest(0);
+			}
 			else
 			{
 				lopt.p_selected_ap = find_visible_ap_from_head();
@@ -5229,7 +5177,10 @@ static int handle_keycode(int keycode)
 			if (tui_state.focus == 1)
 				tui_state.sta_scroll = INT_MAX / 4;
 			else if (tui_state.focus == 2)
+			{
 				tui_state.msg_scroll = INT_MAX / 4;
+				set_message_follow_latest(1);
+			}
 			else
 				lopt.p_selected_ap = find_visible_ap_from_tail();
 			redraw = 1;
@@ -7198,6 +7149,112 @@ static void stop_hopper(void)
 			break;
 	}
 	hopper_pid = -1;
+}
+
+static int resume_hopper(void)
+{
+	struct wif * wi[MAX_CARDS];
+	char ifnam[64];
+	int chan_count;
+	int freq_count;
+	int i;
+	pid_t child_pid;
+
+	if (g_wi == NULL || g_wi[0] == NULL)
+	{
+		snprintf(lopt.message,
+				 sizeof(lopt.message),
+				 "][ no wireless interface available");
+		return (0);
+	}
+
+	if (hopper_pid > 0)
+	{
+		snprintf(lopt.message,
+				 sizeof(lopt.message),
+				 "][ channel hopping already running");
+		append_tui_message_history(lopt.message, time(NULL));
+		return (1);
+	}
+
+	for (i = 0; i < MAX_CARDS; i++)
+		wi[i] = NULL;
+	for (i = 0; i < lopt.num_cards; i++)
+		wi[i] = g_wi[i];
+
+	if (lopt.freqoption)
+	{
+		freq_count = getfreqcount(0);
+		if (freq_count <= 0)
+		{
+			snprintf(lopt.message,
+					 sizeof(lopt.message),
+					 "][ no frequencies available for hopping");
+			append_tui_message_history(lopt.message, time(NULL));
+			return (0);
+		}
+	}
+	else
+	{
+		chan_count = getchancount(0);
+		if (chan_count <= 0)
+		{
+			snprintf(lopt.message,
+					 sizeof(lopt.message),
+					 "][ no channels available for hopping");
+			append_tui_message_history(lopt.message, time(NULL));
+			return (0);
+		}
+	}
+
+	child_pid = fork();
+	if (child_pid == 0)
+	{
+		/* reopen cards.  This way parent & child don't share
+		 * resources for accessing the card (e.g. file descriptors)
+		 * which may cause problems.  -sorbo
+		 */
+		for (i = 0; i < lopt.num_cards; i++)
+		{
+			strlcpy(ifnam, wi_get_ifname(wi[i]), sizeof(ifnam));
+
+			wi_close(wi[i]);
+			wi[i] = wi_open(ifnam);
+			if (!wi[i])
+			{
+				printf("Can't reopen %s\n", ifnam);
+				exit(EXIT_FAILURE);
+			}
+		}
+
+		/* Drop privileges */
+		if (setuid(getuid()) == -1)
+		{
+			perror("setuid");
+		}
+
+		if (lopt.freqoption)
+			frequency_hopper(wi, lopt.num_cards, freq_count, main_pid);
+		else
+			channel_hopper(wi, lopt.num_cards, chan_count, main_pid);
+		exit(EXIT_FAILURE);
+	}
+	else if (child_pid < 0)
+	{
+		perror("fork");
+		snprintf(lopt.message,
+				 sizeof(lopt.message),
+				 "][ failed to resume channel hopping");
+		append_tui_message_history(lopt.message, time(NULL));
+		return (0);
+	}
+
+	hopper_pid = child_pid;
+	lopt.singlechan = 0;
+	lopt.singlefreq = 0;
+	snprintf(lopt.message, sizeof(lopt.message), "][ channel hopping resumed");
+	append_tui_message_history(lopt.message, time(NULL));
+	return (1);
 }
 
 // Function to convert channel array to frequency string

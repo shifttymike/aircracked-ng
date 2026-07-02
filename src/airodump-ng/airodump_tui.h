@@ -17,6 +17,7 @@ struct airodump_tui_state
 	int ap_scroll;
 	int sta_scroll;
 	int msg_scroll;
+	int msg_follow_latest;
 	int focus; /* 0 = AP pane, 1 = station pane, 2 = message pane */
 	int resize_pending;
 	int colors_enabled;
