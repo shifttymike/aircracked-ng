@@ -4064,12 +4064,46 @@ static int IsAp2BeSkipped(struct AP_info * ap_cur)
 	return (0);
 }
 
+static struct AP_info * find_unassociated_ap(void)
+{
+	struct AP_info * ap_cur = lopt.ap_end;
+
+	while (ap_cur != NULL)
+	{
+		if (memcmp(ap_cur->bssid, BROADCAST, 6) == 0)
+			return (ap_cur);
+		ap_cur = ap_cur->prev;
+	}
+
+	return (NULL);
+}
+
+static int has_unassociated_clients(void)
+{
+	struct ST_info * st_cur = lopt.st_1st;
+
+	while (st_cur != NULL)
+	{
+		if (time(NULL) - st_cur->tlast <= lopt.berlin
+			&& st_cur->base != NULL
+			&& memcmp(st_cur->base->bssid, BROADCAST, 6) == 0)
+		{
+			return (1);
+		}
+		st_cur = st_cur->next;
+	}
+
+	return (0);
+}
+
 static struct AP_info * find_visible_ap_from_head(void)
 {
 	struct AP_info * ap_cur = lopt.ap_end;
 
 	while (ap_cur != NULL && IsAp2BeSkipped(ap_cur))
 		ap_cur = ap_cur->prev;
+	if (ap_cur == NULL && has_unassociated_clients())
+		return (find_unassociated_ap());
 	return (ap_cur);
 }
 
@@ -4079,6 +4113,8 @@ static struct AP_info * find_visible_ap_from_tail(void)
 
 	while (ap_cur != NULL && IsAp2BeSkipped(ap_cur))
 		ap_cur = ap_cur->next;
+	if (ap_cur == NULL && has_unassociated_clients())
+		return (find_unassociated_ap());
 	return (ap_cur);
 }
 
@@ -4088,6 +4124,8 @@ static struct AP_info * find_visible_ap_next(struct AP_info * ap_cur)
 	ap_cur = ap_cur->next;
 	while (ap_cur != NULL && IsAp2BeSkipped(ap_cur))
 		ap_cur = ap_cur->next;
+	if (ap_cur == NULL && has_unassociated_clients())
+		return (find_unassociated_ap());
 	return (ap_cur);
 }
 
@@ -4097,6 +4135,8 @@ static struct AP_info * find_visible_ap_prev(struct AP_info * ap_cur)
 	ap_cur = ap_cur->prev;
 	while (ap_cur != NULL && IsAp2BeSkipped(ap_cur))
 		ap_cur = ap_cur->prev;
+	if (ap_cur == NULL && has_unassociated_clients())
+		return (find_unassociated_ap());
 	return (ap_cur);
 }
 

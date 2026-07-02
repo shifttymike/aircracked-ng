@@ -50,6 +50,42 @@ static int ap_visible(const struct AP_info * ap, const struct airodump_tui_view 
 	return (1);
 }
 
+static int visible_unassociated_station_count(const struct airodump_tui_view * view)
+{
+	struct ST_info * st_cur;
+	int count = 0;
+
+	REQUIRE(view != NULL);
+
+	st_cur = view->st_1st;
+	while (st_cur != NULL)
+	{
+		if (time(NULL) - st_cur->tlast <= view->berlin
+			&& st_cur->base != NULL
+			&& memcmp(st_cur->base->bssid, BROADCAST, 6) == 0)
+		{
+			count++;
+		}
+		st_cur = st_cur->next;
+	}
+
+	return (count);
+}
+
+static struct AP_info * find_unassociated_ap(struct AP_info * ap_end)
+{
+	struct AP_info * ap_cur = ap_end;
+
+	while (ap_cur != NULL)
+	{
+		if (memcmp(ap_cur->bssid, BROADCAST, 6) == 0)
+			return (ap_cur);
+		ap_cur = ap_cur->prev;
+	}
+
+	return (NULL);
+}
+
 static size_t collect_visible_aps(struct AP_info * ap_end,
 								  const struct airodump_tui_view * view,
 								  struct AP_info *** out_rows)
@@ -79,6 +115,22 @@ static size_t collect_visible_aps(struct AP_info * ap_end,
 		}
 
 		ap_cur = ap_cur->prev;
+	}
+
+	if (visible_unassociated_station_count(view) > 0)
+	{
+		struct AP_info * unassoc_ap = find_unassociated_ap(ap_end);
+
+		if (unassoc_ap != NULL)
+		{
+			if (count == cap)
+			{
+				cap *= 2;
+				rows = (struct AP_info **) realloc(rows, cap * sizeof(*rows));
+				ALLEGE(rows != NULL);
+			}
+			rows[count++] = unassoc_ap;
+		}
 	}
 
 	*out_rows = rows;
@@ -198,7 +250,16 @@ static int power_pair(const struct AP_info * ap)
 	return (5);
 }
 
-static void render_ap_header_row(int y, int cols, const struct airodump_tui_view * view)
+static void fill_inner_width(int y, int x, int width)
+{
+	if (width > 0)
+		mvhline(y, x, ' ', width);
+}
+
+static void render_ap_header_row(int y,
+								 int x,
+								 int width,
+								 const struct airodump_tui_view * view)
 {
 	char line[1024];
 	size_t used = 0;
@@ -214,41 +275,52 @@ static void render_ap_header_row(int y, int cols, const struct airodump_tui_view
 		used += snprintf(line + used, sizeof(line) - used, "  MANUFACTURER");
 	used += snprintf(line + used, sizeof(line) - used, "  ESSID");
 
-	if (cols < 1) cols = 1;
-	line[MIN(cols - 1, (int) sizeof(line) - 1)] = '\0';
+	if (width < 1) width = 1;
+	if (width > (int) sizeof(line) - 1) width = (int) sizeof(line) - 1;
+	line[width] = '\0';
 	attron(A_BOLD);
-	mvaddnstr(y, 0, line, MIN(cols - 1, (int) sizeof(line) - 1));
-	clrtoeol();
+	mvaddnstr(y, x, line, width);
+	fill_inner_width(y, x + (int) strlen(line), width - (int) strlen(line));
 	attroff(A_BOLD);
 }
 
-static void render_station_header_row(int y, int cols)
+static void render_station_header_row(int y, int x, int width)
 {
 	static const char * header =
 		" BSSID              STATION            PWR   Rate    Lost    Frames  Notes  Probes";
+	int used;
 
-	if (cols < 1) cols = 1;
+	if (width < 1) width = 1;
+	used = (int) strlen(header);
+	if (used > width) used = width;
 	attron(A_BOLD);
-	mvaddnstr(y, 0, header, MIN(cols - 1, (int) strlen(header)));
-	clrtoeol();
+	mvaddnstr(y, x, header, used);
+	fill_inner_width(y, x + used, width - used);
 	attroff(A_BOLD);
 }
 
-static void draw_padded_line(int y, int x, const char * fmt, ...)
+static void draw_padded_line(int y, int x, int width, const char * fmt, ...)
 {
 	char buf[1024];
 	va_list ap;
+	int max_width;
+	int used;
 
 	va_start(ap, fmt);
 	vsnprintf(buf, sizeof(buf), fmt, ap);
 	va_end(ap);
 
-	mvaddnstr(y, x, buf, COLS - x - 1);
-	clrtoeol();
+	max_width = width;
+	if (max_width < 1) max_width = 1;
+	used = (int) strlen(buf);
+	if (used > max_width) used = max_width;
+	mvaddnstr(y, x, buf, used);
+	fill_inner_width(y, x + used, max_width - used);
 }
 
 static void render_ap_row(int y,
-						  int cols,
+						  int x,
+						  int width,
 						  const struct AP_info * ap,
 						  int selected,
 						  const struct airodump_tui_state * state,
@@ -264,8 +336,8 @@ static void render_ap_row(int y,
 	security_auth_string(auth, sizeof(auth), ap->security);
 	std = security_std_string(ap->security);
 	pair = power_pair(ap);
-	if (cols < 2) cols = 2;
-	if (cols > (int) sizeof(line)) cols = (int) sizeof(line);
+	if (width < 2) width = 2;
+	if (width > (int) sizeof(line) - 1) width = (int) sizeof(line) - 1;
 
 	line[0] = selected ? '>' : ' ';
 	snprintf(line + 1,
@@ -318,6 +390,11 @@ static void render_ap_row(int y,
 		size_t used = strlen(line);
 		snprintf(line + used, sizeof(line) - used, " %s", ap->essid);
 	}
+	else if (memcmp(ap->bssid, BROADCAST, 6) == 0 && strlen(line) < sizeof(line) - 24)
+	{
+		size_t used = strlen(line);
+		snprintf(line + used, sizeof(line) - used, " (unassociated clients)");
+	}
 	else if (strlen(line) < sizeof(line) - 16)
 	{
 		size_t used = strlen(line);
@@ -325,7 +402,7 @@ static void render_ap_row(int y,
 				 ap->ssid_length);
 	}
 
-	line[cols - 1] = '\0';
+	line[width] = '\0';
 
 	if (selected)
 		attron(A_BOLD);
@@ -333,8 +410,8 @@ static void render_ap_row(int y,
 	if (state->colors_enabled)
 		attron(COLOR_PAIR(pair));
 
-	mvaddnstr(y, 0, line, cols - 1);
-	clrtoeol();
+	mvaddnstr(y, x, line, width);
+	fill_inner_width(y, x + (int) strlen(line), width - (int) strlen(line));
 
 	if (state->colors_enabled)
 		attroff(COLOR_PAIR(pair));
@@ -344,13 +421,16 @@ static void render_ap_row(int y,
 }
 
 static void render_station_row(int y,
-							   int cols,
+							   int x,
+							   int width,
 							   const struct ST_info * st,
 							   const struct airodump_tui_state * state,
 							   const struct airodump_tui_view * view)
 {
 	char line[1024];
 	char probes[256];
+	char bssid[32];
+	const char * assoc_label = NULL;
 	int i;
 	size_t used = 0;
 
@@ -364,18 +444,33 @@ static void render_station_row(int y,
 				 st->probes[i]);
 		used = strlen(probes);
 	}
-	if (cols < 1) cols = 1;
-	if (cols > (int) sizeof(line)) cols = (int) sizeof(line);
+	if (width < 1) width = 1;
+	if (width > (int) sizeof(line) - 1) width = (int) sizeof(line) - 1;
+
+	if (st->base != NULL && memcmp(st->base->bssid, BROADCAST, 6) != 0)
+	{
+		snprintf(bssid,
+				 sizeof(bssid),
+				 "%02X:%02X:%02X:%02X:%02X:%02X",
+				 st->base->bssid[0],
+				 st->base->bssid[1],
+				 st->base->bssid[2],
+				 st->base->bssid[3],
+				 st->base->bssid[4],
+				 st->base->bssid[5]);
+	}
+	else
+	{
+		strlcpy(bssid, "(not associated)", sizeof(bssid));
+	}
+
+	if (st->base != NULL && memcmp(st->base->bssid, BROADCAST, 6) == 0)
+		assoc_label = "unassociated";
 
 	snprintf(line,
 			 sizeof(line),
-			 " %02X:%02X:%02X:%02X:%02X:%02X  %02X:%02X:%02X:%02X:%02X:%02X  %3d  %2d/%-2d  %4d  %8lu  %-5s  %s",
-			 st->base != NULL ? st->base->bssid[0] : 0xff,
-			 st->base != NULL ? st->base->bssid[1] : 0xff,
-			 st->base != NULL ? st->base->bssid[2] : 0xff,
-			 st->base != NULL ? st->base->bssid[3] : 0xff,
-			 st->base != NULL ? st->base->bssid[4] : 0xff,
-			 st->base != NULL ? st->base->bssid[5] : 0xff,
+			 " %-17s  %02X:%02X:%02X:%02X:%02X:%02X  %3d  %2d/%-2d  %4d  %8lu  %-5s  %s",
+			 bssid,
 			 st->stmac[0],
 			 st->stmac[1],
 			 st->stmac[2],
@@ -390,13 +485,19 @@ static void render_station_row(int y,
 			 (st->wpa.pmkid[0] != 0) ? "PMKID" : (st->wpa.state == 7 ? "EAPOL" : ""),
 			 probes);
 
-	line[cols - 1] = '\0';
+	if (assoc_label != NULL && strlen(line) < sizeof(line) - 24)
+	{
+		size_t line_used = strlen(line);
+		snprintf(line + line_used, sizeof(line) - line_used, " [%s]", assoc_label);
+	}
+
+	line[width] = '\0';
 	if (state->colors_enabled && st->marked)
 		attron(COLOR_PAIR((st->marked_color >= 1 && st->marked_color <= 7)
 							  ? st->marked_color
 							  : 1));
-	mvaddnstr(y, 0, line, cols - 1);
-	clrtoeol();
+	mvaddnstr(y, x, line, width);
+	fill_inner_width(y, x + (int) strlen(line), width - (int) strlen(line));
 	if (state->colors_enabled && st->marked)
 		attroff(COLOR_PAIR((st->marked_color >= 1 && st->marked_color <= 7)
 							   ? st->marked_color
@@ -408,7 +509,7 @@ static void draw_scrollbar(int top,
 						   int total,
 						   int scroll,
 						   int visible,
-						   int cols,
+						   int x,
 						   int active)
 {
 	int track;
@@ -417,7 +518,7 @@ static void draw_scrollbar(int top,
 	int thumb_bottom;
 	int i;
 
-	if (cols < 2 || height < 2 || total <= visible) return;
+	if (x < 0 || height < 2 || total <= visible) return;
 
 	track = height;
 	if (track < 2) return;
@@ -447,13 +548,13 @@ static void draw_scrollbar(int top,
 		{
 			if (active)
 				attron(A_REVERSE);
-			mvaddch(y, cols - 1, '#');
+			mvaddch(y, x, ACS_CKBOARD);
 			if (active)
 				attroff(A_REVERSE);
 		}
 		else
 		{
-			mvaddch(y, cols - 1, '|');
+			mvaddch(y, x, ACS_VLINE);
 		}
 	}
 }
@@ -511,27 +612,40 @@ static void render_header_line(const struct airodump_tui_view * view)
 	attroff(A_BOLD);
 }
 
-static void render_pane_title(int y, int cols, const char * title, int active)
+static void render_pane_box(int top, int height, int cols, const char * title, int active)
 {
 	char line[256];
-	size_t prefix_len;
-	size_t fill_len;
-	size_t max_len;
+	size_t title_len;
 
-	if (cols < 1) cols = 1;
-	snprintf(line, sizeof(line), "+ %s ", title);
-	prefix_len = strlen(line);
-	max_len = (size_t) (cols - 1);
-	fill_len = (prefix_len < max_len) ? (max_len - prefix_len - 1) : 0;
-	if (fill_len > sizeof(line) - prefix_len - 2)
-		fill_len = sizeof(line) - prefix_len - 2;
-	memset(line + prefix_len, '-', fill_len);
-	line[prefix_len + fill_len] = '+';
-	line[prefix_len + fill_len + 1] = '\0';
+	if (cols < 3 || height < 2) return;
+	title_len = strlen(title);
+	if (title_len > sizeof(line) - 4) title_len = sizeof(line) - 4;
+	snprintf(line, sizeof(line), " %.*s ", (int) title_len, title);
 	attron(A_BOLD);
 	if (active) attron(A_REVERSE);
-	mvaddnstr(y, 0, line, MIN(cols - 1, (int) strlen(line)));
-	clrtoeol();
+	mvaddch(top, 0, ACS_ULCORNER);
+	mvhline(top, 1, ACS_HLINE, cols - 2);
+	mvaddch(top, cols - 1, ACS_URCORNER);
+	mvaddnstr(top, 2, line, MIN((int) strlen(line), cols - 4));
+	if (height >= 3)
+	{
+		int y;
+
+		for (y = top + 1; y < top + height - 1; y++)
+		{
+			mvaddch(y, 0, ACS_VLINE);
+			mvaddch(y, cols - 1, ACS_VLINE);
+		}
+		mvaddch(top + height - 1, 0, ACS_LLCORNER);
+		mvhline(top + height - 1, 1, ACS_HLINE, cols - 2);
+		mvaddch(top + height - 1, cols - 1, ACS_LRCORNER);
+	}
+	else
+	{
+		mvaddch(top + 1, 0, ACS_LLCORNER);
+		mvhline(top + 1, 1, ACS_HLINE, cols - 2);
+		mvaddch(top + 1, cols - 1, ACS_LRCORNER);
+	}
 	if (active) attroff(A_REVERSE);
 	attroff(A_BOLD);
 }
@@ -548,6 +662,8 @@ static void render_status_line(const struct airodump_tui_state * state,
 
 	if (view->selected_ap == NULL)
 		strlcat(line, " stations: all", sizeof(line));
+	else if (memcmp(view->selected_ap->bssid, BROADCAST, 6) == 0)
+		strlcat(line, " stations: unassociated", sizeof(line));
 	else
 		strlcat(line, " stations: selected AP", sizeof(line));
 
@@ -663,11 +779,15 @@ void airodump_tui_render(struct airodump_tui_state * state,
 	size_t st_count = 0;
 	int ap_height;
 	int sta_height;
+	int sta_top;
 	size_t ap_start;
 	size_t st_start;
 	size_t i;
 	struct AP_info * selected_ap;
 	int pane_target_rows;
+	int ap_box_top;
+	int sta_box_top;
+	int content_cols;
 
 	if (state == NULL || view == NULL || !state->active) return;
 
@@ -683,13 +803,13 @@ void airodump_tui_render(struct airodump_tui_state * state,
 	state->rows = MAX(state->rows, 3);
 	state->cols = MAX(state->cols, 20);
 
-	pane_target_rows = MAX(3, ((state->rows - 2)
+	pane_target_rows = MAX(4, ((state->rows - 2)
 							   * ((view->show_ap && view->show_sta) ? 40 : 80))
 							  / 100);
 	if (view->show_ap)
 	{
 		ap_height = MIN(pane_target_rows, state->rows - 2);
-		if (ap_height < 3) ap_height = 3;
+		if (ap_height < 4) ap_height = 4;
 	}
 	else
 	{
@@ -698,17 +818,20 @@ void airodump_tui_render(struct airodump_tui_state * state,
 
 	if (view->show_sta)
 	{
-		sta_height = MIN(pane_target_rows, state->rows - ap_height - 1);
-		if (sta_height < 3) sta_height = MIN(MAX(3, state->rows - ap_height - 1),
-										 state->rows - ap_height - 1);
+		sta_top = view->show_ap ? (ap_height + 1) : 1;
+		sta_height = MIN(pane_target_rows, state->rows - sta_top - 1);
+		if (sta_height < 4) sta_height = MIN(MAX(4, state->rows - sta_top - 1),
+										 state->rows - sta_top - 1);
 	}
 	else
 	{
+		sta_top = 0;
 		sta_height = 0;
 	}
 
-	state->ap_visible_rows = MAX(1, ap_height - 2);
-	state->sta_visible_rows = MAX(1, sta_height - 2);
+	state->ap_visible_rows = MAX(1, ap_height - 3);
+	state->sta_visible_rows = MAX(1, sta_height - 3);
+	content_cols = MAX(1, state->cols - 3);
 
 	erase();
 	render_header_line(view);
@@ -749,64 +872,75 @@ void airodump_tui_render(struct airodump_tui_state * state,
 			state->ap_scroll = MAX(0, (int) ap_count - state->ap_visible_rows);
 		}
 
-		render_pane_title(1, state->cols, " Access Points", state->focus == 0);
-		render_ap_header_row(2, state->cols, view);
+		ap_box_top = 1;
+		render_pane_box(ap_box_top, ap_height, state->cols, " Access Points", state->focus == 0);
+		render_ap_header_row(ap_box_top + 1, 1, content_cols, view);
 		ap_start = (size_t) state->ap_scroll;
 		for (i = 0; i < (size_t) state->ap_visible_rows && ap_start + i < ap_count;
 			 ++i)
 		{
 			int selected = (ap_rows[ap_start + i] == selected_ap);
 			render_ap_row((int) i + 3,
-						  state->cols,
+						  1,
+						  content_cols,
 						  ap_rows[ap_start + i],
 						  selected,
 						  state,
 						  view);
 		}
-		draw_scrollbar(3,
+		draw_scrollbar(ap_box_top + 2,
 					   state->ap_visible_rows,
 					   (int) ap_count,
 					   state->ap_scroll,
 					   state->ap_visible_rows,
-					   state->cols,
+					   state->cols - 2,
 					   state->focus == 0);
 	}
 	else if (view->show_ap)
 	{
-		render_pane_title(1, state->cols, " Access Points", state->focus == 0);
-		render_ap_header_row(2, state->cols, view);
-		draw_padded_line(3, 0, " No APs match the current filters.");
+		ap_box_top = 1;
+		ap_height = MAX(4, ap_height);
+		render_pane_box(ap_box_top, ap_height, state->cols, " Access Points", state->focus == 0);
+		render_ap_header_row(ap_box_top + 1, 1, content_cols, view);
+		draw_padded_line(ap_box_top + 2, 1, content_cols, " No APs match the current filters.");
 	}
 
-	if (view->show_sta && state->rows - ap_height - 1 > 0)
+	if (view->show_sta && state->rows - sta_top - 1 > 0)
 	{
-		int y = view->show_ap ? ap_height : 1;
 		char header[512];
+		int body_top;
 
 		if (view->selected_ap != NULL)
 		{
-			snprintf(header,
-					 sizeof(header),
-					 " Stations for %02X:%02X:%02X:%02X:%02X:%02X",
-					 view->selected_ap->bssid[0],
-					 view->selected_ap->bssid[1],
-					 view->selected_ap->bssid[2],
-					 view->selected_ap->bssid[3],
-					 view->selected_ap->bssid[4],
-					 view->selected_ap->bssid[5]);
+			if (memcmp(view->selected_ap->bssid, BROADCAST, 6) == 0)
+				strlcpy(header, " Stations (unassociated)", sizeof(header));
+			else
+			{
+				snprintf(header,
+						 sizeof(header),
+						 " Stations for %02X:%02X:%02X:%02X:%02X:%02X",
+						 view->selected_ap->bssid[0],
+						 view->selected_ap->bssid[1],
+						 view->selected_ap->bssid[2],
+						 view->selected_ap->bssid[3],
+						 view->selected_ap->bssid[4],
+						 view->selected_ap->bssid[5]);
+			}
 		}
 		else
 		{
 			strlcpy(header, " Stations (all)", sizeof(header));
 		}
 
-		render_pane_title(y, state->cols, header, state->focus == 1);
-		render_station_header_row(y + 1, state->cols);
+		sta_box_top = view->show_ap ? (ap_height + 1) : 1;
+		body_top = sta_box_top + 1;
+		render_pane_box(sta_box_top, sta_height, state->cols, header, state->focus == 1);
+		render_station_header_row(body_top, 1, content_cols);
 
 		st_count = collect_visible_stations(view->st_1st, view, &st_rows);
 		if (st_count == 0)
 		{
-			draw_padded_line(y + 2, 0, " No stations match the current filters.");
+			draw_padded_line(body_top + 1, 1, content_cols, " No stations match the current filters.");
 		}
 		else
 		{
@@ -820,19 +954,20 @@ void airodump_tui_render(struct airodump_tui_state * state,
 			for (i = 0; i < (size_t) state->sta_visible_rows && st_start + i < st_count;
 				 ++i)
 			{
-				render_station_row(y + 2 + (int) i,
-								   state->cols,
+				render_station_row(body_top + 1 + (int) i,
+								   1,
+								   content_cols,
 								   st_rows[st_start + i],
 								   state,
 								   view);
 			}
 		}
-		draw_scrollbar(y + 2,
+		draw_scrollbar(body_top + 2,
 					   state->sta_visible_rows,
 					   (int) st_count,
 					   state->sta_scroll,
 					   state->sta_visible_rows,
-					   state->cols,
+					   state->cols - 2,
 					   state->focus == 1);
 	}
 
