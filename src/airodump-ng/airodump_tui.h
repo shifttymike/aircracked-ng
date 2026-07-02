@@ -52,6 +52,8 @@ struct airodump_tui_view
 	int show_manufacturer;
 	int show_wps;
 	int freqoption;
+	int show_ax_channels;
+	const char * band_label;
 	int num_cards;
 	int channel[MAX_CARDS];
 	int frequency[MAX_CARDS];

@@ -64,6 +64,70 @@ EXPORT int getFrequencyFromChannel(int channel)
 					 : -1;
 }
 
+static const int channel_frequency_map_ax[] = {
+	1,   5955,
+	2,   5935,
+	5,   5975,
+	9,   5995,
+	13,  6015,
+	17,  6035,
+	21,  6055,
+	25,  6075,
+	29,  6095,
+	33,  6115,
+	37,  6135,
+	41,  6155,
+	45,  6175,
+	49,  6195,
+	53,  6215,
+	57,  6235,
+	61,  6255,
+	65,  6275,
+	69,  6295,
+	73,  6315,
+	77,  6335,
+	81,  6355,
+	85,  6375,
+	89,  6395,
+	93,  6415,
+	97,  6435,
+	101, 6455,
+	105, 6475,
+	109, 6495,
+	113, 6515,
+	117, 6535,
+	121, 6555,
+	125, 6575,
+	129, 6595,
+	133, 6615,
+	137, 6635,
+	141, 6655,
+	145, 6675,
+	149, 6695,
+	153, 6715,
+	157, 6735,
+	161, 6755,
+	165, 6775,
+	169, 6795,
+	173, 6815,
+	177, 6835,
+	181, 6855,
+	185, 6875,
+	189, 6895,
+	193, 6915,
+	197, 6935,
+	201, 6955,
+	205, 6975,
+	209, 6995,
+	213, 7015,
+	217, 7035,
+	221, 7055,
+	225, 7075,
+	229, 7095,
+	233, 7115,
+	-1,  -1
+};
+
 /**
  * Return the channel from the frequency (in Mhz)
  */
@@ -73,9 +137,16 @@ EXPORT int getChannelFromFrequency(int frequency)
 		return (frequency - 2407) / 5;
 	else if (frequency == 2484)
 		return 14;
-
-	else if (frequency >= 4920 && frequency <= 6100)
-		return (frequency - 5000) / 5;
 	else
+	{
+		for (int i = 0; channel_frequency_map_ax[i] != -1; i += 2)
+		{
+			if (channel_frequency_map_ax[i + 1] == frequency)
+				return channel_frequency_map_ax[i];
+		}
+
+		if (frequency >= 4920 && frequency <= 6100)
+			return (frequency - 5000) / 5;
 		return -1;
+	}
 }

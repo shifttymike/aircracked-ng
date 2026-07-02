@@ -121,6 +121,7 @@ struct AP_info
 	struct ac_channel_info ac_channel; /* 802.11ac channel info    */
 	struct ax_channel_info ax_channel; /* 802.11ax channel info    */
 	int max_speed; /* AP maximum speed in Mb/s */
+	int bss_load_station_count; /* Stations from BSS Load IE */
 	int avg_power; /* averaged signal power    */
 	int best_power; /* best signal power    */
 	int power_index; /* index in power ring buf. */

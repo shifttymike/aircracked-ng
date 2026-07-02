@@ -20,6 +20,7 @@
 #include "aircrack-ng/crypto/crypto.h"
 #include "aircrack-ng/compat.h"
 #include "aircrack-ng/support/common.h"
+#include "aircrack-ng/osdep/common.h"
 #include "aircrack-ng/utf8/verifyssid.h"
 
 extern int is_filtered_essid(const uint8_t * essid);
@@ -250,6 +251,16 @@ static int power_pair(const struct AP_info * ap)
 	return (5);
 }
 
+static void format_bss_load_station_count(const struct AP_info * ap,
+										  char * out,
+										  size_t out_len)
+{
+	if (ap != NULL && ap->bss_load_station_count >= 0)
+		snprintf(out, out_len, "%5d", ap->bss_load_station_count);
+	else
+		strlcpy(out, "    ?", out_len);
+}
+
 static void fill_inner_width(int y, int x, int width)
 {
 	if (width > 0)
@@ -267,14 +278,14 @@ static void render_ap_header_row(int y,
 	line[0] = ' ';
 	used = snprintf(line + 1,
 					sizeof(line) - 1,
-					" %-17s  %3s  %8s  %8s  %4s  %3s  %4s  %-4s %-7s %-4s",
+					" %-17s  %3s  %8s  %8s  %4s  %3s  %5s  %4s %-7s %-4s",
 					"BSSID",
 					"PWR",
 					"Beacons",
 					"#Data",
 					"#/s",
 					"CH",
-					"MB",
+					"STAs",
 					"ENC",
 					"CIPHER",
 					"AUTH");
@@ -426,6 +437,7 @@ static void render_ap_row(int y,
 						  const struct airodump_tui_view * view)
 {
 	char line[1024];
+	char stas[8];
 	char cipher[32];
 	char auth[32];
 	const char * std;
@@ -434,6 +446,7 @@ static void render_ap_row(int y,
 	security_cipher_string(cipher, sizeof(cipher), ap->security);
 	security_auth_string(auth, sizeof(auth), ap->security);
 	std = security_std_string(ap->security);
+	format_bss_load_station_count(ap, stas, sizeof(stas));
 	pair = power_pair(ap);
 	if (width < 2) width = 2;
 	if (width > (int) sizeof(line) - 1) width = (int) sizeof(line) - 1;
@@ -441,7 +454,7 @@ static void render_ap_row(int y,
 	line[0] = selected ? '>' : ' ';
 	snprintf(line + 1,
 			 sizeof(line) - 1,
-			 " %02X:%02X:%02X:%02X:%02X:%02X  %3d  %8lu  %8lu  %4d  %3d  %4d  %-4s %-7s %-4s ",
+			 " %02X:%02X:%02X:%02X:%02X:%02X  %3d  %8lu  %8lu  %4d  %3d  %5s  %-4s %-7s %-4s ",
 			 ap->bssid[0],
 			 ap->bssid[1],
 			 ap->bssid[2],
@@ -453,7 +466,7 @@ static void render_ap_row(int y,
 			 ap->nb_data,
 			 ap->nb_dataps,
 			 ap->channel,
-			 ap->max_speed,
+			 stas,
 			 std,
 			 cipher,
 			 auth);
@@ -525,6 +538,7 @@ static size_t measure_ap_row_width(const struct AP_info * ap,
 								   const struct airodump_tui_view * view)
 {
 	char line[1024];
+	char stas[8];
 	char cipher[32];
 	char auth[32];
 	const char * std;
@@ -532,11 +546,12 @@ static size_t measure_ap_row_width(const struct AP_info * ap,
 	security_cipher_string(cipher, sizeof(cipher), ap->security);
 	security_auth_string(auth, sizeof(auth), ap->security);
 	std = security_std_string(ap->security);
+	format_bss_load_station_count(ap, stas, sizeof(stas));
 
 	line[0] = selected ? '>' : ' ';
 	snprintf(line + 1,
 			 sizeof(line) - 1,
-			 " %02X:%02X:%02X:%02X:%02X:%02X  %3d  %8lu  %8lu  %4d  %3d  %4d  %-4s %-7s %-4s ",
+			 " %02X:%02X:%02X:%02X:%02X:%02X  %3d  %8lu  %8lu  %4d  %3d  %5s  %-4s %-7s %-4s ",
 			 ap->bssid[0],
 			 ap->bssid[1],
 			 ap->bssid[2],
@@ -548,7 +563,7 @@ static size_t measure_ap_row_width(const struct AP_info * ap,
 			 ap->nb_data,
 			 ap->nb_dataps,
 			 ap->channel,
-			 ap->max_speed,
+			 stas,
 			 std,
 			 cipher,
 			 auth);
@@ -608,14 +623,14 @@ static size_t measure_ap_header_width(const struct airodump_tui_view * view)
 	line[0] = ' ';
 	used = snprintf(line + 1,
 					sizeof(line) - 1,
-					" %-17s  %3s  %8s  %8s  %4s  %3s  %4s  %-4s %-7s %-4s",
+					" %-17s  %3s  %8s  %8s  %4s  %3s  %5s  %-4s %-7s %-4s",
 					"BSSID",
 					"PWR",
 					"Beacons",
 					"#Data",
 					"#/s",
 					"CH",
-					"MB",
+					"STAs",
 					"ENC",
 					"CIPHER",
 					"AUTH");
@@ -781,14 +796,24 @@ static void render_header_line(const struct airodump_tui_view * view)
 
 	if (view->freqoption)
 	{
-		used += snprintf(line + used, sizeof(line) - used, " Freq");
+		used += snprintf(line + used,
+						 sizeof(line) - used,
+						 view->show_ax_channels ? " CH" : " Freq");
 		for (i = 0; i < view->num_cards; i++)
 		{
+			int value = view->frequency[i];
+
+			if (view->show_ax_channels)
+			{
+				int channel = getChannelFromFrequency(value);
+
+				if (channel > 0) value = channel;
+			}
 			used += snprintf(line + used,
 							 sizeof(line) - used,
 							 "%s%4d",
 							 (i == 0) ? " " : ",",
-							 view->frequency[i]);
+							 value);
 		}
 	}
 	else
@@ -803,6 +828,12 @@ static void render_header_line(const struct airodump_tui_view * view)
 							 view->channel[i]);
 		}
 	}
+
+	if (view->band_label != NULL)
+		used += snprintf(line + used,
+						 sizeof(line) - used,
+						 " [Band: %s]",
+						 view->band_label);
 
 	if (view->batt != NULL) used += snprintf(line + used, sizeof(line) - used, " %s", view->batt);
 	if (view->elapsed_time != NULL)
@@ -894,6 +925,7 @@ static void render_status_line(const struct airodump_tui_state * state,
 
 	strlcat(line, "  c clear AP filter", sizeof(line));
 	strlcat(line, "  d run log_sta", sizeof(line));
+	strlcat(line, "  b switch band", sizeof(line));
 	strlcat(line, "  r resume hop", sizeof(line));
 	strlcat(line, "  R realtime sort", sizeof(line));
 

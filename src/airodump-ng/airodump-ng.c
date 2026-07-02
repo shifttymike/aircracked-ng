@@ -566,11 +566,16 @@ static volatile time_t quitting_event_ts = 0;
 static volatile int log_sta_launching = 0;
 static volatile time_t log_sta_event_ts = 0;
 static volatile pid_t hopper_pid = -1;
+static int hopper_pipe_ready = 0;
 static pid_t main_pid = -1;
 static struct wif ** g_wi = NULL;
 static int use_ncurses_tui = 0;
 static volatile sig_atomic_t tui_resize_pending = 0;
 static struct airodump_tui_state tui_state;
+#define BAND_MODE_BG 0
+#define BAND_MODE_A 1
+#define BAND_MODE_AX 2
+#define BAND_MODE_CUSTOM 3
 #define AIRODUMP_TUI_MESSAGE_HISTORY 256
 static struct airodump_tui_message_entry tui_message_history[AIRODUMP_TUI_MESSAGE_HISTORY];
 static size_t tui_message_history_count = 0;
@@ -587,13 +592,17 @@ static int getfreqcount(int valid);
 static void channel_hopper(struct wif * wi[], int if_num, int chan_count, pid_t parent);
 static void frequency_hopper(struct wif * wi[], int if_num, int chan_count, pid_t parent);
 static int channel_to_frequency(int channel);
+static int frequency_to_channel(int frequency);
 static void stop_hopper(void);
+static int switch_band(void);
+static const char * band_mode_label(int band_mode);
 static int handle_keycode(int keycode);
 static void render_output(void);
 static void render_output_view(int record_message_history);
 static void restore_terminal(void);
 static void record_tui_message_history(void);
 static void append_tui_message_history(const char * message, time_t timestamp);
+static void append_tui_message_history_now(const char * message);
 static void set_message_follow_latest(int follow_latest);
 static int tui_message_pane_visible(void);
 static void set_tui_focus(int focus);
@@ -643,6 +652,7 @@ static struct local_options
 
 	int * own_channels; /* custom channel list  */
 	int * own_frequencies; /* custom frequency list  */
+	int band_mode; /* current band selection */
 
 	int asso_client; /* only show associated clients */
 
@@ -1199,7 +1209,7 @@ static int launch_log_sta(void)
 				execlp("aireplay-ng",
 					   "aireplay-ng",
 					   "-0",
-					   "1",
+					   "5",
 					   "-a",
 					   apmac,
 					   "-c",
@@ -2137,6 +2147,7 @@ static int dump_add_packet(unsigned char * h80211,
 
 		ap_cur->channel = -1;
 		ap_cur->max_speed = -1;
+		ap_cur->bss_load_station_count = -1;
 		ap_cur->security = 0;
 
 		ap_cur->ivbuf = NULL;
@@ -2893,6 +2904,13 @@ skip_probe:
 			} 
 			
 			// Next
+			if (p[0] == 0x0b && p[1] >= 5)
+			{
+				/* BSS Load: station count, channel utilization, available capacity */
+				ap_cur->bss_load_station_count = (int) load16_le(p + 2);
+			}
+
+			// Next
 			p += 2 + p[1];
 			
 		}
@@ -3335,6 +3353,7 @@ skip_probe:
 						 ap_cur->bssid[3],
 						 ap_cur->bssid[4],
 						 ap_cur->bssid[5]);
+				append_tui_message_history_now(lopt.message);
 			}
 		}
 
@@ -3514,6 +3533,7 @@ skip_probe:
 							 ap_cur->bssid[3],
 							 ap_cur->bssid[4],
 							 ap_cur->bssid[5]);
+					append_tui_message_history_now(lopt.message);
 				}
 			}
 		}
@@ -3573,7 +3593,7 @@ skip_probe:
 							memcpy(st_cur->wpa.stmac, st_cur->stmac, 6);
 							memcpy(lopt.wpa_bssid, ap_cur->bssid, 6);
 							memset(lopt.message, '\x00', sizeof(lopt.message));
-							snprintf(lopt.message,
+						 snprintf(lopt.message,
 									 sizeof(lopt.message) - 1,
 									 "][ PMKID found: "
 									 "%02X:%02X:%02X:%02X:%02X:%02X ",
@@ -3583,6 +3603,7 @@ skip_probe:
 									 lopt.wpa_bssid[3],
 									 lopt.wpa_bssid[4],
 									 lopt.wpa_bssid[5]);
+							append_tui_message_history_now(lopt.message);
 
 							goto write_packet;
 						}
@@ -3677,6 +3698,7 @@ skip_probe:
 						 lopt.wpa_bssid[3],
 						 lopt.wpa_bssid[4],
 						 lopt.wpa_bssid[5]);
+				append_tui_message_history_now(lopt.message);
 
 				if (opt.f_ivs != NULL)
 				{
@@ -4548,6 +4570,13 @@ static void append_tui_message_history(const char * message, time_t timestamp)
 	tui_message_history_count++;
 }
 
+static void append_tui_message_history_now(const char * message)
+{
+	append_tui_message_history(message, time(NULL));
+	if (use_ncurses_tui)
+		render_output_view(0);
+}
+
 static void render_output(void)
 {
 	render_output_view(1);
@@ -4576,6 +4605,8 @@ static void render_output_view(int record_message_history)
 		view.show_manufacturer = lopt.show_manufacturer;
 		view.show_wps = lopt.show_wps;
 		view.freqoption = lopt.freqoption;
+		view.show_ax_channels = (lopt.band_mode == BAND_MODE_AX);
+		view.band_label = band_mode_label(lopt.band_mode);
 		view.num_cards = lopt.num_cards;
 		memcpy(view.channel, lopt.channel, sizeof(view.channel));
 		memcpy(view.frequency, lopt.frequency, sizeof(view.frequency));
@@ -4810,6 +4841,12 @@ static int handle_keycode(int keycode)
 	{
 		resume_hopper();
 		redraw = 1;
+	}
+
+	if (keycode == 'b')
+	{
+		if (switch_band())
+			redraw = 1;
 	}
 
 	if (keycode == 'R')
@@ -5272,11 +5309,19 @@ static void dump_print(int ws_row, int ws_col, int if_num)
 
 	if (lopt.freqoption)
 	{
-		snprintf(strbuf, sizeof(strbuf) - 1, " Freq %4d", lopt.frequency[0]);
+		snprintf(strbuf,
+				 sizeof(strbuf) - 1,
+				 lopt.band_mode == BAND_MODE_AX ? " CH %2d" : " Freq %4d",
+				 lopt.band_mode == BAND_MODE_AX ? frequency_to_channel(lopt.frequency[0])
+												 : lopt.frequency[0]);
 		for (i = 1; i < if_num; i++)
 		{
 			memset(buffer, '\0', sizeof(buffer));
-			snprintf(buffer, sizeof(buffer), ",%4d", lopt.frequency[i]);
+			snprintf(buffer,
+					 sizeof(buffer),
+					 lopt.band_mode == BAND_MODE_AX ? ",%2d" : ",%4d",
+					 lopt.band_mode == BAND_MODE_AX ? frequency_to_channel(lopt.frequency[i])
+													 : lopt.frequency[i]);
 			strlcat(strbuf, buffer, sizeof(strbuf));
 		}
 	}
@@ -6710,6 +6755,8 @@ static void sighandler(int signum)
 
 	if (signum == SIGINT || signum == SIGTERM)
 	{
+		if (getpid() != main_pid)
+			_exit(0);
 		lopt.do_exit = 1;
 		if (!use_ncurses_tui)
 		{
@@ -7136,6 +7183,16 @@ static int channel_to_frequency(int channel)
 	return (channel_to_frequency_ax(channel));
 }
 
+static int frequency_to_channel(int frequency)
+{
+	int channel = getChannelFromFrequency(frequency);
+
+	if (channel > 0)
+		return (channel);
+
+	return (frequency);
+}
+
 static void stop_hopper(void)
 {
 	int status;
@@ -7155,8 +7212,8 @@ static int resume_hopper(void)
 {
 	struct wif * wi[MAX_CARDS];
 	char ifnam[64];
-	int chan_count;
-	int freq_count;
+	int chan_count = 0;
+	int freq_count = 0;
 	int i;
 	pid_t child_pid;
 
@@ -7207,6 +7264,22 @@ static int resume_hopper(void)
 		}
 	}
 
+	if (!hopper_pipe_ready)
+	{
+		struct sigaction action;
+
+		IGNORE_NZ(pipe(lopt.ch_pipe));
+		IGNORE_NZ(pipe(lopt.cd_pipe));
+
+		action.sa_flags = 0;
+		action.sa_handler = &sighandler;
+		sigemptyset(&action.sa_mask);
+
+		if (sigaction(SIGUSR1, &action, NULL) == -1)
+			perror("sigaction(SIGUSR1)");
+		hopper_pipe_ready = 1;
+	}
+
 	child_pid = fork();
 	if (child_pid == 0)
 	{
@@ -7253,6 +7326,132 @@ static int resume_hopper(void)
 	lopt.singlechan = 0;
 	lopt.singlefreq = 0;
 	snprintf(lopt.message, sizeof(lopt.message), "][ channel hopping resumed");
+	append_tui_message_history(lopt.message, time(NULL));
+	return (1);
+}
+
+static const char * band_mode_label(int band_mode)
+{
+	switch (band_mode)
+	{
+		case BAND_MODE_BG:
+			return ("2.4 GHz");
+		case BAND_MODE_A:
+			return ("5 GHz");
+		case BAND_MODE_AX:
+			return ("6 GHz");
+		default:
+			return ("custom");
+	}
+}
+
+static int build_ax_frequency_list(int ** freqs_out)
+{
+	size_t count = 0;
+	size_t i;
+	int * freqs;
+
+	REQUIRE(freqs_out != NULL);
+
+	while (ax_chans[count] != 0) count++;
+	freqs = (int *) malloc(sizeof(int) * (count + 1));
+	if (freqs == NULL) return (0);
+
+	for (i = 0; i < count; i++)
+		freqs[i] = channel_to_frequency_ax(ax_chans[i]);
+	freqs[count] = 0;
+	*freqs_out = freqs;
+	return (1);
+}
+
+static int switch_band(void)
+{
+	int old_band_mode = lopt.band_mode;
+	int * old_own_frequencies = lopt.own_frequencies;
+	int next_band_mode;
+	int * new_freqs = NULL;
+	int success;
+
+	switch (lopt.band_mode)
+	{
+		case BAND_MODE_BG:
+			next_band_mode = BAND_MODE_A;
+			break;
+		case BAND_MODE_A:
+			next_band_mode = BAND_MODE_AX;
+			break;
+		case BAND_MODE_AX:
+		case BAND_MODE_CUSTOM:
+		default:
+			next_band_mode = BAND_MODE_BG;
+			break;
+	}
+
+	if (next_band_mode == BAND_MODE_AX)
+	{
+		if (!build_ax_frequency_list(&new_freqs))
+		{
+			snprintf(lopt.message,
+					 sizeof(lopt.message),
+					 "][ unable to build 6 GHz band list");
+			append_tui_message_history(lopt.message, time(NULL));
+			return (0);
+		}
+	}
+
+	stop_hopper();
+
+	if (next_band_mode == BAND_MODE_AX)
+	{
+		lopt.channels = (int *) ax_chans;
+		lopt.freqoption = 1;
+		lopt.chanoption = 0;
+		lopt.own_frequencies = new_freqs;
+	}
+	else if (next_band_mode == BAND_MODE_A)
+	{
+		lopt.channels = (int *) a_chans;
+		lopt.freqoption = 0;
+		lopt.chanoption = 1;
+	}
+	else
+	{
+		lopt.channels = (int *) bg_chans;
+		lopt.freqoption = 0;
+		lopt.chanoption = 1;
+	}
+
+	lopt.singlechan = 0;
+	lopt.singlefreq = 0;
+	lopt.band_mode = next_band_mode;
+
+	success = resume_hopper();
+	if (!success)
+	{
+		if (next_band_mode == BAND_MODE_AX && new_freqs != NULL)
+		{
+			free(new_freqs);
+		}
+		lopt.band_mode = old_band_mode;
+		lopt.own_frequencies = old_own_frequencies;
+		return (0);
+	}
+
+	if (next_band_mode != BAND_MODE_AX && old_own_frequencies != NULL)
+	{
+		free(old_own_frequencies);
+		lopt.own_frequencies = NULL;
+	}
+	else if (next_band_mode == BAND_MODE_AX && old_own_frequencies != NULL
+			 && old_own_frequencies != new_freqs)
+	{
+		free(old_own_frequencies);
+	}
+
+	snprintf(lopt.message,
+			 sizeof(lopt.message),
+			 "][ band switched to %s",
+			 band_mode_label(lopt.band_mode));
 	append_tui_message_history(lopt.message, time(NULL));
 	return (1);
 }
@@ -8841,6 +9040,15 @@ int main(int argc, char * argv[])
 	if (lopt.show_wps && lopt.show_manufacturer)
 		lopt.maxsize_essid_seen += lopt.maxsize_wps_seen;
 
+	if (lopt.freqoption)
+		lopt.band_mode = lopt.scan_11ax ? BAND_MODE_AX : BAND_MODE_CUSTOM;
+	else if (lopt.channels == (int *) a_chans)
+		lopt.band_mode = BAND_MODE_A;
+	else if (lopt.channels == (int *) bg_chans)
+		lopt.band_mode = BAND_MODE_BG;
+	else
+		lopt.band_mode = BAND_MODE_CUSTOM;
+
 	if (lopt.s_iface != NULL)
 	{
 		/* initialize cards */
@@ -8887,6 +9095,7 @@ int main(int argc, char * argv[])
 
 				if (sigaction(SIGUSR1, &action, NULL) == -1)
 					perror("sigaction(SIGUSR1)");
+				hopper_pipe_ready = 1;
 
 				hopper_pid = fork();
 				if (hopper_pid == 0)
@@ -8961,6 +9170,7 @@ int main(int argc, char * argv[])
 
 				if (sigaction(SIGUSR1, &action, NULL) == -1)
 					perror("sigaction(SIGUSR1)");
+				hopper_pipe_ready = 1;
 
 				hopper_pid = fork();
 				if (hopper_pid == 0)
