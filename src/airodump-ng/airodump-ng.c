@@ -566,7 +566,6 @@ static volatile time_t quitting_event_ts = 0;
 static int use_ncurses_tui = 0;
 static volatile sig_atomic_t tui_resize_pending = 0;
 static struct airodump_tui_state tui_state;
-
 static void dump_sort(void);
 static void dump_print(int ws_row, int ws_col, int if_num);
 static char *
@@ -4065,17 +4064,47 @@ static int IsAp2BeSkipped(struct AP_info * ap_cur)
 	return (0);
 }
 
+static struct AP_info * find_visible_ap_from_head(void)
+{
+	struct AP_info * ap_cur = lopt.ap_end;
+
+	while (ap_cur != NULL && IsAp2BeSkipped(ap_cur))
+		ap_cur = ap_cur->prev;
+	return (ap_cur);
+}
+
+static struct AP_info * find_visible_ap_from_tail(void)
+{
+	struct AP_info * ap_cur = lopt.ap_1st;
+
+	while (ap_cur != NULL && IsAp2BeSkipped(ap_cur))
+		ap_cur = ap_cur->next;
+	return (ap_cur);
+}
+
+static struct AP_info * find_visible_ap_next(struct AP_info * ap_cur)
+{
+	if (ap_cur == NULL) return (find_visible_ap_from_tail());
+	ap_cur = ap_cur->next;
+	while (ap_cur != NULL && IsAp2BeSkipped(ap_cur))
+		ap_cur = ap_cur->next;
+	return (ap_cur);
+}
+
+static struct AP_info * find_visible_ap_prev(struct AP_info * ap_cur)
+{
+	if (ap_cur == NULL) return (find_visible_ap_from_head());
+	ap_cur = ap_cur->prev;
+	while (ap_cur != NULL && IsAp2BeSkipped(ap_cur))
+		ap_cur = ap_cur->prev;
+	return (ap_cur);
+}
+
 static void render_output(void)
 {
 	if (use_ncurses_tui)
 	{
 		struct airodump_tui_view view;
-
-		if (lopt.p_selected_ap == NULL && lopt.ap_end != NULL && lopt.show_ap)
-		{
-			lopt.p_selected_ap = lopt.ap_end;
-			lopt.en_selection_direction = selection_direction_down;
-		}
 
 		memset(&view, 0, sizeof(view));
 		view.ap_1st = lopt.ap_1st;
@@ -4124,6 +4153,20 @@ static void restore_terminal(void)
 		reset_term();
 		show_cursor();
 	}
+
+}
+
+static void set_tui_focus(int focus)
+{
+#ifdef HAVE_NCURSES
+	if (!use_ncurses_tui) return;
+	if (lopt.show_ap == 1 && lopt.show_sta == 1)
+		tui_state.focus = (focus != 0) ? 1 : 0;
+	else
+		tui_state.focus = (lopt.show_sta == 1) ? 1 : 0;
+#else
+	UNUSED_PARAM(focus);
+#endif
 }
 
 static int handle_keycode(int keycode)
@@ -4329,10 +4372,7 @@ static int handle_keycode(int keycode)
 	{
 		if (use_ncurses_tui)
 		{
-			if (lopt.show_ap == 1 && lopt.show_sta == 1)
-				tui_state.focus = (tui_state.focus == 0) ? 1 : 0;
-			else
-				tui_state.focus = 0;
+			set_tui_focus((tui_state.focus == 0) ? 1 : 0);
 			redraw = 1;
 		}
 		else if (lopt.p_selected_ap == NULL)
@@ -4413,22 +4453,41 @@ static int handle_keycode(int keycode)
 
 	if (keycode == KEY_d)
 	{
-		resetSelection();
 		if (use_ncurses_tui)
 		{
+			lopt.p_selected_ap = NULL;
+			lopt.en_selection_direction = selection_direction_no;
+			memset(lopt.selected_bssid, '\x00', 6);
 			tui_state.ap_scroll = 0;
 			tui_state.sta_scroll = 0;
 			tui_state.focus = 0;
+			snprintf(lopt.message,
+					 sizeof(lopt.message),
+					 "][ cleared AP selection");
 		}
-		snprintf(lopt.message,
-				 sizeof(lopt.message),
-				 "][ reset selection to default");
+		else
+		{
+			resetSelection();
+			snprintf(lopt.message,
+					 sizeof(lopt.message),
+					 "][ reset selection to default");
+		}
 		redraw = 1;
 	}
 
 #ifdef HAVE_NCURSES
 	if (use_ncurses_tui)
 	{
+		if (keycode == KEY_LEFT)
+		{
+			set_tui_focus(0);
+			redraw = 1;
+		}
+		if (keycode == KEY_RIGHT)
+		{
+			set_tui_focus(1);
+			redraw = 1;
+		}
 		if (keycode == KEY_RESIZE)
 		{
 			tui_resize_pending = 1;
@@ -4441,11 +4500,27 @@ static int handle_keycode(int keycode)
 				if (tui_state.sta_scroll > 0) tui_state.sta_scroll--;
 				redraw = 1;
 			}
-			else if (lopt.p_selected_ap && lopt.p_selected_ap->next)
+			else if (lopt.p_selected_ap != NULL)
 			{
-				lopt.p_selected_ap = lopt.p_selected_ap->next;
-				lopt.en_selection_direction = selection_direction_up;
-				redraw = 1;
+				struct AP_info * next_ap = find_visible_ap_next(lopt.p_selected_ap);
+
+				if (next_ap != NULL)
+				{
+					lopt.p_selected_ap = next_ap;
+					lopt.en_selection_direction = selection_direction_up;
+					redraw = 1;
+				}
+			}
+			else
+			{
+				struct AP_info * next_ap = find_visible_ap_from_tail();
+
+				if (next_ap != NULL)
+				{
+					lopt.p_selected_ap = next_ap;
+					lopt.en_selection_direction = selection_direction_up;
+					redraw = 1;
+				}
 			}
 		}
 		if (keycode == KEY_DOWN)
@@ -4455,11 +4530,27 @@ static int handle_keycode(int keycode)
 				tui_state.sta_scroll++;
 				redraw = 1;
 			}
-			else if (lopt.p_selected_ap && lopt.p_selected_ap->prev)
+			else if (lopt.p_selected_ap != NULL)
 			{
-				lopt.p_selected_ap = lopt.p_selected_ap->prev;
-				lopt.en_selection_direction = selection_direction_down;
-				redraw = 1;
+				struct AP_info * prev_ap = find_visible_ap_prev(lopt.p_selected_ap);
+
+				if (prev_ap != NULL)
+				{
+					lopt.p_selected_ap = prev_ap;
+					lopt.en_selection_direction = selection_direction_down;
+					redraw = 1;
+				}
+			}
+			else
+			{
+				struct AP_info * prev_ap = find_visible_ap_from_head();
+
+				if (prev_ap != NULL)
+				{
+					lopt.p_selected_ap = prev_ap;
+					lopt.en_selection_direction = selection_direction_down;
+					redraw = 1;
+				}
 			}
 		}
 		if (keycode == KEY_PPAGE)
@@ -4490,7 +4581,7 @@ static int handle_keycode(int keycode)
 				tui_state.sta_scroll = 0;
 			else
 			{
-				lopt.p_selected_ap = lopt.ap_end;
+				lopt.p_selected_ap = find_visible_ap_from_head();
 				tui_state.ap_scroll = 0;
 			}
 			redraw = 1;
@@ -4500,7 +4591,7 @@ static int handle_keycode(int keycode)
 			if (tui_state.focus == 1)
 				tui_state.sta_scroll = INT_MAX / 4;
 			else
-				lopt.p_selected_ap = lopt.ap_1st;
+				lopt.p_selected_ap = find_visible_ap_from_tail();
 			redraw = 1;
 		}
 	}
@@ -8665,7 +8756,7 @@ int main(int argc, char * argv[])
 				needs_render = 1;
 			}
 
-			while ((keycode = airodump_tui_getch(&tui_state)) != ERR)
+			while ((keycode = airodump_tui_getch(&tui_state)) != -1)
 			{
 				if (handle_keycode(keycode)) needs_render = 1;
 			}

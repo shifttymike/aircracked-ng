@@ -165,6 +165,9 @@ PKG_CHECK_MODULES([NCURSES], [ncursesw], [
 		], [NCURSES_FOUND=no])
 	])
 AM_CONDITIONAL([HAVE_NCURSES], [test "$NCURSES_FOUND" = yes])
+AS_IF([test "$NCURSES_FOUND" = yes], [
+	AC_DEFINE([HAVE_NCURSES], [1], [Define to 1 if ncurses is available])
+])
 PKG_CHECK_MODULES([CMOCKA], [cmocka], [
 		CMOCKA_FOUND=yes
 		AC_SUBST([CMOCKA_CFLAGS])

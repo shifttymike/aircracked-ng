@@ -102,8 +102,8 @@ static size_t collect_visible_stations(struct ST_info * st_1st,
 
 	while (st_cur != NULL)
 	{
-		if (st_cur->base == view->selected_ap
-			&& time(NULL) - st_cur->tlast <= view->berlin)
+		if (time(NULL) - st_cur->tlast <= view->berlin
+			&& (view->selected_ap == NULL || st_cur->base == view->selected_ap))
 		{
 			if (count == cap)
 			{
@@ -198,6 +198,42 @@ static int power_pair(const struct AP_info * ap)
 	return (5);
 }
 
+static void render_ap_header_row(int y, int cols, const struct airodump_tui_view * view)
+{
+	char line[1024];
+	size_t used = 0;
+
+	used += snprintf(line + used,
+					 sizeof(line) - used,
+					 " BSSID              PWR  Beacons    #Data, #/s  CH   MB   ENC CIPHER  AUTH");
+	if (view->show_uptime)
+		used += snprintf(line + used, sizeof(line) - used, "   UPTIME");
+	if (view->show_wps)
+		used += snprintf(line + used, sizeof(line) - used, "  WPS");
+	if (view->show_manufacturer)
+		used += snprintf(line + used, sizeof(line) - used, "  MANUFACTURER");
+	used += snprintf(line + used, sizeof(line) - used, "  ESSID");
+
+	if (cols < 1) cols = 1;
+	line[MIN(cols - 1, (int) sizeof(line) - 1)] = '\0';
+	attron(A_BOLD);
+	mvaddnstr(y, 0, line, MIN(cols - 1, (int) sizeof(line) - 1));
+	clrtoeol();
+	attroff(A_BOLD);
+}
+
+static void render_station_header_row(int y, int cols)
+{
+	static const char * header =
+		" BSSID              STATION            PWR   Rate    Lost    Frames  Notes  Probes";
+
+	if (cols < 1) cols = 1;
+	attron(A_BOLD);
+	mvaddnstr(y, 0, header, MIN(cols - 1, (int) strlen(header)));
+	clrtoeol();
+	attroff(A_BOLD);
+}
+
 static void draw_padded_line(int y, int x, const char * fmt, ...)
 {
 	char buf[1024];
@@ -228,11 +264,12 @@ static void render_ap_row(int y,
 	security_auth_string(auth, sizeof(auth), ap->security);
 	std = security_std_string(ap->security);
 	pair = power_pair(ap);
-	if (cols < 1) cols = 1;
+	if (cols < 2) cols = 2;
 	if (cols > (int) sizeof(line)) cols = (int) sizeof(line);
 
-	snprintf(line,
-			 sizeof(line),
+	line[0] = selected ? '>' : ' ';
+	snprintf(line + 1,
+			 sizeof(line) - 1,
 			 " %02X:%02X:%02X:%02X:%02X:%02X  %3d  %8lu  %8lu  %4d  %3d  %-4s %-7s %-4s ",
 			 ap->bssid[0],
 			 ap->bssid[1],
@@ -291,7 +328,7 @@ static void render_ap_row(int y,
 	line[cols - 1] = '\0';
 
 	if (selected)
-		attron(A_REVERSE);
+		attron(A_BOLD);
 
 	if (state->colors_enabled)
 		attron(COLOR_PAIR(pair));
@@ -303,7 +340,7 @@ static void render_ap_row(int y,
 		attroff(COLOR_PAIR(pair));
 
 	if (selected)
-		attroff(A_REVERSE);
+		attroff(A_BOLD);
 }
 
 static void render_station_row(int y,
@@ -333,12 +370,12 @@ static void render_station_row(int y,
 	snprintf(line,
 			 sizeof(line),
 			 " %02X:%02X:%02X:%02X:%02X:%02X  %02X:%02X:%02X:%02X:%02X:%02X  %3d  %2d/%-2d  %4d  %8lu  %-5s  %s",
-			 st->base->bssid[0],
-			 st->base->bssid[1],
-			 st->base->bssid[2],
-			 st->base->bssid[3],
-			 st->base->bssid[4],
-			 st->base->bssid[5],
+			 st->base != NULL ? st->base->bssid[0] : 0xff,
+			 st->base != NULL ? st->base->bssid[1] : 0xff,
+			 st->base != NULL ? st->base->bssid[2] : 0xff,
+			 st->base != NULL ? st->base->bssid[3] : 0xff,
+			 st->base != NULL ? st->base->bssid[4] : 0xff,
+			 st->base != NULL ? st->base->bssid[5] : 0xff,
 			 st->stmac[0],
 			 st->stmac[1],
 			 st->stmac[2],
@@ -364,6 +401,61 @@ static void render_station_row(int y,
 		attroff(COLOR_PAIR((st->marked_color >= 1 && st->marked_color <= 7)
 							   ? st->marked_color
 							   : 1));
+}
+
+static void draw_scrollbar(int top,
+						   int height,
+						   int total,
+						   int scroll,
+						   int visible,
+						   int cols,
+						   int active)
+{
+	int track;
+	int thumb;
+	int thumb_top;
+	int thumb_bottom;
+	int i;
+
+	if (cols < 2 || height < 2 || total <= visible) return;
+
+	track = height;
+	if (track < 2) return;
+
+	if (visible < 1) visible = 1;
+	if (total < 1) total = 1;
+	if (scroll < 0) scroll = 0;
+	if (scroll > total - visible) scroll = MAX(0, total - visible);
+
+	thumb = (visible * track) / total;
+	if (thumb < 1) thumb = 1;
+	if (thumb > track) thumb = track;
+
+	if (total == visible)
+		thumb_top = 0;
+	else
+		thumb_top = (scroll * (track - thumb)) / (total - visible);
+	thumb_bottom = thumb_top + thumb;
+	if (thumb_bottom > track) thumb_bottom = track;
+
+	for (i = 0; i < track; i++)
+	{
+		int y = top + i;
+
+		if (y < 0 || y >= LINES) continue;
+		if (i >= thumb_top && i < thumb_bottom)
+		{
+			if (active)
+				attron(A_REVERSE);
+			mvaddch(y, cols - 1, '#');
+			if (active)
+				attroff(A_REVERSE);
+		}
+		else
+		{
+			mvaddch(y, cols - 1, '|');
+		}
+	}
 }
 
 static void render_header_line(const struct airodump_tui_view * view)
@@ -419,6 +511,31 @@ static void render_header_line(const struct airodump_tui_view * view)
 	attroff(A_BOLD);
 }
 
+static void render_pane_title(int y, int cols, const char * title, int active)
+{
+	char line[256];
+	size_t prefix_len;
+	size_t fill_len;
+	size_t max_len;
+
+	if (cols < 1) cols = 1;
+	snprintf(line, sizeof(line), "+ %s ", title);
+	prefix_len = strlen(line);
+	max_len = (size_t) (cols - 1);
+	fill_len = (prefix_len < max_len) ? (max_len - prefix_len - 1) : 0;
+	if (fill_len > sizeof(line) - prefix_len - 2)
+		fill_len = sizeof(line) - prefix_len - 2;
+	memset(line + prefix_len, '-', fill_len);
+	line[prefix_len + fill_len] = '+';
+	line[prefix_len + fill_len + 1] = '\0';
+	attron(A_BOLD);
+	if (active) attron(A_REVERSE);
+	mvaddnstr(y, 0, line, MIN(cols - 1, (int) strlen(line)));
+	clrtoeol();
+	if (active) attroff(A_REVERSE);
+	attroff(A_BOLD);
+}
+
 static void render_status_line(const struct airodump_tui_state * state,
 							   const struct airodump_tui_view * view)
 {
@@ -426,9 +543,29 @@ static void render_status_line(const struct airodump_tui_state * state,
 
 	snprintf(line,
 			 sizeof(line),
-			 "F1 help | Tab switch pane | arrows scroll | PgUp/PgDn page | Home/End jump | q quit | %s%s",
-			 (state->focus == 0) ? "[AP]" : " AP",
-			 (state->focus == 1) ? "[STA]" : " STA");
+			 "F1 help | Tab/Left/Right switch pane | arrows scroll | PgUp/PgDn page | Home/End jump | q quit | Focus: %s",
+			 (state->focus == 1) ? "STA" : "AP");
+
+	if (view->selected_ap == NULL)
+		strlcat(line, " stations: all", sizeof(line));
+	else
+		strlcat(line, " stations: selected AP", sizeof(line));
+
+	if (view->show_ap && view->show_sta)
+	{
+		strlcat(line, (state->focus == 0) ? " [AP]" : " AP", sizeof(line));
+		strlcat(line, (state->focus == 1) ? " [STA]" : " STA", sizeof(line));
+	}
+	else if (view->show_ap)
+	{
+		strlcat(line, " [AP only]", sizeof(line));
+	}
+	else if (view->show_sta)
+	{
+		strlcat(line, " [STA only]", sizeof(line));
+	}
+
+	strlcat(line, "  d clear AP filter", sizeof(line));
 
 	if (view->do_pause)
 		strlcat(line, " paused", sizeof(line));
@@ -459,7 +596,15 @@ static void ensure_colors(struct airodump_tui_state * state)
 
 int airodump_tui_available(void)
 {
-	if (!isatty(STDOUT_FILENO) || !isatty(STDIN_FILENO)) return (0);
+	int stdin_tty;
+	int stdout_tty;
+
+	stdin_tty = isatty(STDIN_FILENO);
+	stdout_tty = isatty(STDOUT_FILENO);
+	if (!stdout_tty || !stdin_tty)
+	{
+		return (0);
+	}
 #ifndef HAVE_NCURSES
 	return (0);
 #else
@@ -472,9 +617,15 @@ int airodump_tui_start(struct airodump_tui_state * state)
 	if (state == NULL) return (0);
 	memset(state, 0, sizeof(*state));
 
-	if (!airodump_tui_available()) return (0);
+	if (!airodump_tui_available())
+	{
+		return (0);
+	}
 
-	if (initscr() == NULL) return (0);
+	if (initscr() == NULL)
+	{
+		return (0);
+	}
 
 	cbreak();
 	noecho();
@@ -512,12 +663,11 @@ void airodump_tui_render(struct airodump_tui_state * state,
 	size_t st_count = 0;
 	int ap_height;
 	int sta_height;
-	int ap_visible_rows;
-	int sta_visible_rows;
 	size_t ap_start;
 	size_t st_start;
 	size_t i;
 	struct AP_info * selected_ap;
+	int pane_target_rows;
 
 	if (state == NULL || view == NULL || !state->active) return;
 
@@ -533,16 +683,32 @@ void airodump_tui_render(struct airodump_tui_state * state,
 	state->rows = MAX(state->rows, 3);
 	state->cols = MAX(state->cols, 20);
 
-	ap_height = (view->show_ap && view->show_sta) ? MAX(6, state->rows / 2)
-												   : (view->show_ap ? state->rows - 1
-																	: 1);
-	if (ap_height > state->rows - 2) ap_height = state->rows - 2;
-	if (ap_height < 3 && view->show_ap) ap_height = state->rows - 1;
-	sta_height = state->rows - ap_height - 1;
-	if (sta_height < 0) sta_height = 0;
+	pane_target_rows = MAX(3, ((state->rows - 2)
+							   * ((view->show_ap && view->show_sta) ? 40 : 80))
+							  / 100);
+	if (view->show_ap)
+	{
+		ap_height = MIN(pane_target_rows, state->rows - 2);
+		if (ap_height < 3) ap_height = 3;
+	}
+	else
+	{
+		ap_height = 0;
+	}
 
-	state->ap_visible_rows = MAX(1, ap_height - 1);
-	state->sta_visible_rows = MAX(1, sta_height - 1);
+	if (view->show_sta)
+	{
+		sta_height = MIN(pane_target_rows, state->rows - ap_height - 1);
+		if (sta_height < 3) sta_height = MIN(MAX(3, state->rows - ap_height - 1),
+										 state->rows - ap_height - 1);
+	}
+	else
+	{
+		sta_height = 0;
+	}
+
+	state->ap_visible_rows = MAX(1, ap_height - 2);
+	state->sta_visible_rows = MAX(1, sta_height - 2);
 
 	erase();
 	render_header_line(view);
@@ -583,27 +749,38 @@ void airodump_tui_render(struct airodump_tui_state * state,
 			state->ap_scroll = MAX(0, (int) ap_count - state->ap_visible_rows);
 		}
 
+		render_pane_title(1, state->cols, " Access Points", state->focus == 0);
+		render_ap_header_row(2, state->cols, view);
 		ap_start = (size_t) state->ap_scroll;
 		for (i = 0; i < (size_t) state->ap_visible_rows && ap_start + i < ap_count;
 			 ++i)
 		{
 			int selected = (ap_rows[ap_start + i] == selected_ap);
-			render_ap_row((int) i + 1,
+			render_ap_row((int) i + 3,
 						  state->cols,
 						  ap_rows[ap_start + i],
 						  selected,
 						  state,
 						  view);
 		}
+		draw_scrollbar(3,
+					   state->ap_visible_rows,
+					   (int) ap_count,
+					   state->ap_scroll,
+					   state->ap_visible_rows,
+					   state->cols,
+					   state->focus == 0);
 	}
 	else if (view->show_ap)
 	{
-		draw_padded_line(1, 0, " No APs match the current filters.");
+		render_pane_title(1, state->cols, " Access Points", state->focus == 0);
+		render_ap_header_row(2, state->cols, view);
+		draw_padded_line(3, 0, " No APs match the current filters.");
 	}
 
 	if (view->show_sta && state->rows - ap_height - 1 > 0)
 	{
-		int y = ap_height;
+		int y = view->show_ap ? ap_height : 1;
 		char header[512];
 
 		if (view->selected_ap != NULL)
@@ -620,55 +797,51 @@ void airodump_tui_render(struct airodump_tui_state * state,
 		}
 		else
 		{
-			strlcpy(header, " Stations", sizeof(header));
+			strlcpy(header, " Stations (all)", sizeof(header));
 		}
 
-		attron(A_BOLD);
-		mvaddnstr(y, 0, header, state->cols - 1);
-		clrtoeol();
-		attroff(A_BOLD);
+		render_pane_title(y, state->cols, header, state->focus == 1);
+		render_station_header_row(y + 1, state->cols);
 
-		if (view->selected_ap != NULL)
+		st_count = collect_visible_stations(view->st_1st, view, &st_rows);
+		if (st_count == 0)
 		{
-			st_count = collect_visible_stations(view->st_1st, view, &st_rows);
-			if (st_count == 0)
-			{
-				draw_padded_line(y + 1, 0, " No stations associated with the selected AP.");
-			}
-			else
-			{
-				if ((size_t) state->sta_scroll > st_count - 1)
-					state->sta_scroll = (int) (st_count - 1);
-				if (state->sta_scroll < 0) state->sta_scroll = 0;
-				if (state->focus == 1
-					&& (size_t) state->sta_scroll >= st_count)
-					state->sta_scroll = 0;
+			draw_padded_line(y + 2, 0, " No stations match the current filters.");
+		}
+		else
+		{
+			if ((size_t) state->sta_scroll > st_count - 1)
+				state->sta_scroll = (int) (st_count - 1);
+			if (state->sta_scroll < 0) state->sta_scroll = 0;
+			if (state->focus == 1 && (size_t) state->sta_scroll >= st_count)
+				state->sta_scroll = 0;
 
-				st_start = (size_t) state->sta_scroll;
-				for (i = 0; i < (size_t) state->sta_visible_rows
-								&& st_start + i < st_count;
-					 ++i)
-				{
-				render_station_row(y + 1 + (int) i,
+			st_start = (size_t) state->sta_scroll;
+			for (i = 0; i < (size_t) state->sta_visible_rows && st_start + i < st_count;
+				 ++i)
+			{
+				render_station_row(y + 2 + (int) i,
 								   state->cols,
 								   st_rows[st_start + i],
 								   state,
 								   view);
-				}
 			}
 		}
-		else
-		{
-			draw_padded_line(y + 1, 0, " Select an AP to view station details.");
-		}
+		draw_scrollbar(y + 2,
+					   state->sta_visible_rows,
+					   (int) st_count,
+					   state->sta_scroll,
+					   state->sta_visible_rows,
+					   state->cols,
+					   state->focus == 1);
 	}
 
 	render_status_line(state, view);
 	wnoutrefresh(stdscr);
 	doupdate();
 
-free(ap_rows);
-free(st_rows);
+	free(ap_rows);
+	free(st_rows);
 }
 
 #else
