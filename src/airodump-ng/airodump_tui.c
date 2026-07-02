@@ -299,6 +299,35 @@ static void render_station_header_row(int y, int x, int width)
 	attroff(A_BOLD);
 }
 
+static void render_message_row(int y, int x, int width, const struct airodump_tui_message_entry * entry)
+{
+	char line[1024];
+	char ts[32];
+	struct tm * lt;
+	int used;
+
+	if (width < 1) width = 1;
+	if (width > (int) sizeof(line) - 1) width = (int) sizeof(line) - 1;
+
+	lt = localtime(&(entry->timestamp));
+	if (lt != NULL)
+	{
+		if (strftime(ts, sizeof(ts), "%H:%M:%S", lt) == 0)
+			strlcpy(ts, "--:--:--", sizeof(ts));
+	}
+	else
+	{
+		strlcpy(ts, "--:--:--", sizeof(ts));
+	}
+
+	used = snprintf(line, sizeof(line), "%s %s", ts, entry->text);
+	if (used < 0) used = 0;
+	if (used > width) used = width;
+	line[used] = '\0';
+	mvaddnstr(y, x, line, used);
+	fill_inner_width(y, x + used, width - used);
+}
+
 static void draw_padded_line(int y, int x, int width, const char * fmt, ...)
 {
 	char buf[1024];
@@ -342,7 +371,7 @@ static void render_ap_row(int y,
 	line[0] = selected ? '>' : ' ';
 	snprintf(line + 1,
 			 sizeof(line) - 1,
-			 " %02X:%02X:%02X:%02X:%02X:%02X  %3d  %8lu  %8lu  %4d  %3d  %-4s %-7s %-4s ",
+			 " %02X:%02X:%02X:%02X:%02X:%02X  %3d  %8lu  %8lu  %4d  %3d  %4d  %-4s %-7s %-4s ",
 			 ap->bssid[0],
 			 ap->bssid[1],
 			 ap->bssid[2],
@@ -354,6 +383,7 @@ static void render_ap_row(int y,
 			 ap->nb_data,
 			 ap->nb_dataps,
 			 ap->channel,
+			 ap->max_speed,
 			 std,
 			 cipher,
 			 auth);
@@ -612,7 +642,7 @@ static void render_header_line(const struct airodump_tui_view * view)
 	attroff(A_BOLD);
 }
 
-static void render_pane_box(int top, int height, int cols, const char * title, int active)
+static void render_pane_box(int top, int left, int height, int cols, const char * title, int active)
 {
 	char line[256];
 	size_t title_len;
@@ -623,28 +653,28 @@ static void render_pane_box(int top, int height, int cols, const char * title, i
 	snprintf(line, sizeof(line), " %.*s ", (int) title_len, title);
 	attron(A_BOLD);
 	if (active) attron(A_REVERSE);
-	mvaddch(top, 0, ACS_ULCORNER);
-	mvhline(top, 1, ACS_HLINE, cols - 2);
-	mvaddch(top, cols - 1, ACS_URCORNER);
-	mvaddnstr(top, 2, line, MIN((int) strlen(line), cols - 4));
+	mvaddch(top, left, ACS_ULCORNER);
+	mvhline(top, left + 1, ACS_HLINE, cols - 2);
+	mvaddch(top, left + cols - 1, ACS_URCORNER);
+	mvaddnstr(top, left + 2, line, MIN((int) strlen(line), cols - 4));
 	if (height >= 3)
 	{
 		int y;
 
 		for (y = top + 1; y < top + height - 1; y++)
 		{
-			mvaddch(y, 0, ACS_VLINE);
-			mvaddch(y, cols - 1, ACS_VLINE);
+			mvaddch(y, left, ACS_VLINE);
+			mvaddch(y, left + cols - 1, ACS_VLINE);
 		}
-		mvaddch(top + height - 1, 0, ACS_LLCORNER);
-		mvhline(top + height - 1, 1, ACS_HLINE, cols - 2);
-		mvaddch(top + height - 1, cols - 1, ACS_LRCORNER);
+		mvaddch(top + height - 1, left, ACS_LLCORNER);
+		mvhline(top + height - 1, left + 1, ACS_HLINE, cols - 2);
+		mvaddch(top + height - 1, left + cols - 1, ACS_LRCORNER);
 	}
 	else
 	{
-		mvaddch(top + 1, 0, ACS_LLCORNER);
-		mvhline(top + 1, 1, ACS_HLINE, cols - 2);
-		mvaddch(top + 1, cols - 1, ACS_LRCORNER);
+		mvaddch(top + 1, left, ACS_LLCORNER);
+		mvhline(top + 1, left + 1, ACS_HLINE, cols - 2);
+		mvaddch(top + 1, left + cols - 1, ACS_LRCORNER);
 	}
 	if (active) attroff(A_REVERSE);
 	attroff(A_BOLD);
@@ -658,7 +688,7 @@ static void render_status_line(const struct airodump_tui_state * state,
 	snprintf(line,
 			 sizeof(line),
 			 "F1 help | Tab/Left/Right switch pane | arrows scroll | PgUp/PgDn page | Home/End jump | q quit | Focus: %s",
-			 (state->focus == 1) ? "STA" : "AP");
+			 (state->focus == 1) ? "STA" : (state->focus == 2) ? "MSG" : "AP");
 
 	if (view->selected_ap == NULL)
 		strlcat(line, " stations: all", sizeof(line));
@@ -681,7 +711,8 @@ static void render_status_line(const struct airodump_tui_state * state,
 		strlcat(line, " [STA only]", sizeof(line));
 	}
 
-	strlcat(line, "  d clear AP filter", sizeof(line));
+	strlcat(line, "  c clear AP filter", sizeof(line));
+	strlcat(line, "  d run log_sta", sizeof(line));
 
 	if (view->do_pause)
 		strlcat(line, " paused", sizeof(line));
@@ -780,14 +811,22 @@ void airodump_tui_render(struct airodump_tui_state * state,
 	int ap_height;
 	int sta_height;
 	int sta_top;
+	int content_rows;
+	int top_height;
 	size_t ap_start;
 	size_t st_start;
 	size_t i;
 	struct AP_info * selected_ap;
-	int pane_target_rows;
 	int ap_box_top;
+	int ap_box_left;
+	int ap_box_width;
 	int sta_box_top;
-	int content_cols;
+	int sta_box_left;
+	int sta_box_width;
+	int msg_box_top;
+	int msg_box_left;
+	int msg_box_width = 0;
+	int msg_enabled;
 
 	if (state == NULL || view == NULL || !state->active) return;
 
@@ -802,26 +841,49 @@ void airodump_tui_render(struct airodump_tui_state * state,
 	getmaxyx(stdscr, state->rows, state->cols);
 	state->rows = MAX(state->rows, 3);
 	state->cols = MAX(state->cols, 20);
+	content_rows = MAX(1, state->rows - 2);
+	msg_enabled = (view->show_ap && state->cols >= 90);
 
-	pane_target_rows = MAX(4, ((state->rows - 2)
-							   * ((view->show_ap && view->show_sta) ? 40 : 80))
-							  / 100);
 	if (view->show_ap)
 	{
-		ap_height = MIN(pane_target_rows, state->rows - 2);
-		if (ap_height < 4) ap_height = 4;
+		if (view->show_sta)
+		{
+			ap_height = MAX(4, (content_rows * 40) / 100);
+			if (ap_height > content_rows - 4)
+				ap_height = MAX(4, content_rows - 4);
+		}
+		else
+		{
+			ap_height = content_rows;
+		}
 	}
 	else
 	{
 		ap_height = 0;
 	}
+	top_height = ap_height;
+
+	if (msg_enabled)
+	{
+		msg_box_width = MAX(28, state->cols / 4);
+		if (msg_box_width > state->cols - 60)
+			msg_box_width = state->cols - 60;
+		if (msg_box_width < 24)
+			msg_enabled = 0;
+	}
+
+	if (msg_enabled)
+		ap_box_width = state->cols - msg_box_width;
+	else
+		ap_box_width = state->cols;
 
 	if (view->show_sta)
 	{
 		sta_top = view->show_ap ? (ap_height + 1) : 1;
-		sta_height = MIN(pane_target_rows, state->rows - sta_top - 1);
-		if (sta_height < 4) sta_height = MIN(MAX(4, state->rows - sta_top - 1),
-										 state->rows - sta_top - 1);
+		if (view->show_ap)
+			sta_height = MAX(4, content_rows - ap_height);
+		else
+			sta_height = content_rows;
 	}
 	else
 	{
@@ -831,7 +893,7 @@ void airodump_tui_render(struct airodump_tui_state * state,
 
 	state->ap_visible_rows = MAX(1, ap_height - 3);
 	state->sta_visible_rows = MAX(1, sta_height - 3);
-	content_cols = MAX(1, state->cols - 3);
+	state->msg_visible_rows = MAX(1, top_height - 2);
 
 	erase();
 	render_header_line(view);
@@ -873,16 +935,17 @@ void airodump_tui_render(struct airodump_tui_state * state,
 		}
 
 		ap_box_top = 1;
-		render_pane_box(ap_box_top, ap_height, state->cols, " Access Points", state->focus == 0);
-		render_ap_header_row(ap_box_top + 1, 1, content_cols, view);
+		ap_box_left = 0;
+		render_pane_box(ap_box_top, ap_box_left, ap_height, ap_box_width, " Access Points", state->focus == 0);
+		render_ap_header_row(ap_box_top + 1, ap_box_left + 1, ap_box_width - 2, view);
 		ap_start = (size_t) state->ap_scroll;
 		for (i = 0; i < (size_t) state->ap_visible_rows && ap_start + i < ap_count;
 			 ++i)
 		{
 			int selected = (ap_rows[ap_start + i] == selected_ap);
 			render_ap_row((int) i + 3,
-						  1,
-						  content_cols,
+						  ap_box_left + 1,
+						  ap_box_width - 2,
 						  ap_rows[ap_start + i],
 						  selected,
 						  state,
@@ -893,16 +956,63 @@ void airodump_tui_render(struct airodump_tui_state * state,
 					   (int) ap_count,
 					   state->ap_scroll,
 					   state->ap_visible_rows,
-					   state->cols - 2,
+					   ap_box_left + ap_box_width - 2,
 					   state->focus == 0);
 	}
 	else if (view->show_ap)
 	{
 		ap_box_top = 1;
 		ap_height = MAX(4, ap_height);
-		render_pane_box(ap_box_top, ap_height, state->cols, " Access Points", state->focus == 0);
-		render_ap_header_row(ap_box_top + 1, 1, content_cols, view);
-		draw_padded_line(ap_box_top + 2, 1, content_cols, " No APs match the current filters.");
+		ap_box_left = 0;
+		render_pane_box(ap_box_top, ap_box_left, ap_height, ap_box_width, " Access Points", state->focus == 0);
+		render_ap_header_row(ap_box_top + 1, ap_box_left + 1, ap_box_width - 2, view);
+		draw_padded_line(ap_box_top + 2, ap_box_left + 1, ap_box_width - 2, " No APs match the current filters.");
+	}
+
+	if (msg_enabled)
+	{
+		size_t msg_count;
+		size_t msg_start;
+		char title[128];
+
+		strlcpy(title, " Messages", sizeof(title));
+
+		msg_box_top = 1;
+		msg_box_left = ap_box_width;
+		render_pane_box(msg_box_top, msg_box_left, top_height, msg_box_width, title, state->focus == 2);
+
+		msg_count = view->message_count;
+		if (msg_count == 0)
+		{
+			draw_padded_line(msg_box_top + 1, msg_box_left + 1, msg_box_width - 2, " No messages yet.");
+		}
+		else
+		{
+			if ((size_t) state->msg_scroll > msg_count - 1)
+				state->msg_scroll = (int) (msg_count - 1);
+			if (state->msg_scroll < 0) state->msg_scroll = 0;
+			if (msg_count <= (size_t) state->msg_visible_rows)
+				state->msg_scroll = 0;
+			else if ((size_t) state->msg_scroll > msg_count - state->msg_visible_rows)
+				state->msg_scroll = MAX(0, (int) msg_count - state->msg_visible_rows);
+
+			msg_start = (size_t) state->msg_scroll;
+			for (i = 0; i < (size_t) state->msg_visible_rows && msg_start + i < msg_count;
+				 ++i)
+			{
+				render_message_row(msg_box_top + 1 + (int) i,
+								   msg_box_left + 1,
+								   msg_box_width - 2,
+								   &(view->messages[msg_start + i]));
+			}
+			draw_scrollbar(msg_box_top + 1,
+					   state->msg_visible_rows,
+					   (int) msg_count,
+					   state->msg_scroll,
+					   state->msg_visible_rows,
+					   msg_box_left + msg_box_width - 2,
+					   state->focus == 2);
+		}
 	}
 
 	if (view->show_sta && state->rows - sta_top - 1 > 0)
@@ -934,13 +1044,15 @@ void airodump_tui_render(struct airodump_tui_state * state,
 
 		sta_box_top = view->show_ap ? (ap_height + 1) : 1;
 		body_top = sta_box_top + 1;
-		render_pane_box(sta_box_top, sta_height, state->cols, header, state->focus == 1);
-		render_station_header_row(body_top, 1, content_cols);
+		sta_box_left = 0;
+		sta_box_width = state->cols;
+		render_pane_box(sta_box_top, sta_box_left, sta_height, sta_box_width, header, state->focus == 1);
+		render_station_header_row(body_top, 1, sta_box_width - 2);
 
 		st_count = collect_visible_stations(view->st_1st, view, &st_rows);
 		if (st_count == 0)
 		{
-			draw_padded_line(body_top + 1, 1, content_cols, " No stations match the current filters.");
+			draw_padded_line(body_top + 1, 1, sta_box_width - 2, " No stations match the current filters.");
 		}
 		else
 		{
@@ -956,18 +1068,18 @@ void airodump_tui_render(struct airodump_tui_state * state,
 			{
 				render_station_row(body_top + 1 + (int) i,
 								   1,
-								   content_cols,
+								   sta_box_width - 2,
 								   st_rows[st_start + i],
 								   state,
 								   view);
 			}
 		}
-		draw_scrollbar(body_top + 2,
+		draw_scrollbar(body_top + 1,
 					   state->sta_visible_rows,
 					   (int) st_count,
 					   state->sta_scroll,
 					   state->sta_visible_rows,
-					   state->cols - 2,
+					   sta_box_width - 2,
 					   state->focus == 1);
 	}
 

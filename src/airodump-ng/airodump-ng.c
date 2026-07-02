@@ -563,17 +563,39 @@ static int * frequencies;
 
 static volatile int quitting = 0;
 static volatile time_t quitting_event_ts = 0;
+static volatile int log_sta_launching = 0;
+static volatile time_t log_sta_event_ts = 0;
+static volatile pid_t hopper_pid = -1;
+static pid_t main_pid = -1;
+static struct wif ** g_wi = NULL;
 static int use_ncurses_tui = 0;
 static volatile sig_atomic_t tui_resize_pending = 0;
 static struct airodump_tui_state tui_state;
+#define AIRODUMP_TUI_MESSAGE_HISTORY 256
+static struct airodump_tui_message_entry tui_message_history[AIRODUMP_TUI_MESSAGE_HISTORY];
+static size_t tui_message_history_count = 0;
+static char tui_message_history_last[512];
 static void dump_sort(void);
 static void dump_print(int ws_row, int ws_col, int if_num);
 static char *
 get_manufacturer(unsigned char mac0, unsigned char mac1, unsigned char mac2);
 int is_filtered_essid(const uint8_t * essid);
+static int launch_log_sta(void);
+static int getchancount(int valid);
+static int getfreqcount(int valid);
+static void channel_hopper(struct wif * wi[], int if_num, int chan_count, pid_t parent);
+static void frequency_hopper(struct wif * wi[], int if_num, int chan_count, pid_t parent);
+static int channel_to_frequency(int channel);
+static void stop_hopper(void);
 static int handle_keycode(int keycode);
 static void render_output(void);
+static void render_output_view(int record_message_history);
 static void restore_terminal(void);
+static void record_tui_message_history(void);
+static void append_tui_message_history(const char * message, time_t timestamp);
+static int tui_message_pane_visible(void);
+static void set_tui_focus(int focus);
+static void cycle_tui_focus(int direction);
 
 /* bunch of global stuff */
 struct communication_options opt;
@@ -730,36 +752,6 @@ static struct local_options
 unsigned char targets[MAX_TARGETS][6]; // Array to store MAC addresses
 uint8_t wildcard_nibbles[MAX_TARGETS][12];
 int num_targets = 0; // Number of MAC addresses stored
-
-// Function to validate a MAC address
-static int isValidMACAddress(const char *mac) {
-    int i = 0, s = 0;
-    for (i = 0; mac[i] != '\0'; i++) {
-        if ((i % 3 == 2 && mac[i] != ':') || (i % 3 != 2 && !isxdigit(mac[i]))) {
-            return 0; // Invalid MAC
-        }
-        if (i % 3 != 2) s++;
-    }
-    return s == 12 && i == 17; // Valid MAC has 12 hex digits and 5 colons
-}
-
-// Function to convert MAC address string to byte array
-static int convertMACToBytes(const char *mac_str, uint8_t *mac_bytes) {
-	// Ensure the input string is not too long to fit into the local buffer
-    if (strlen(mac_str) > 17) {
-        return -1;
-    }
-    if (!isValidMACAddress(mac_str)) {
-        return -1; // Invalid MAC address
-    }
-    for (int i = 0; i < 6; i++) {
-        unsigned int byte;
-        sscanf(mac_str + 3 * i, "%2x", &byte);
-        mac_bytes[i] = (uint8_t)byte;
-    }
-
-    return 0; // Success
-}
 
 static int convertMACToBytesWithWildcards(const char *mac_str, uint8_t *mac_bytes, uint8_t *nibble_mask) {
     if (strlen(mac_str) != 17) return -1;
@@ -970,6 +962,443 @@ static void resetSelection(void)
 	lopt.do_pause = 0;
 	lopt.do_sort_always = 0;
 	memset(lopt.selected_bssid, '\x00', 6);
+}
+
+static void format_mac(char * out, size_t out_len, const uint8_t mac[6])
+{
+	snprintf(out,
+			 out_len,
+			 "%02X:%02X:%02X:%02X:%02X:%02X",
+			 mac[0],
+			 mac[1],
+			 mac[2],
+			 mac[3],
+			 mac[4],
+			 mac[5]);
+}
+
+static int launch_log_sta(void)
+{
+	struct AP_info * ap_cur;
+	struct ST_info * st_cur;
+	struct wif * wi[MAX_CARDS];
+	char apmac[18];
+	char stmac[18];
+	char wlan_if[64];
+	const char * ifname;
+	int station_count = 0;
+	int i;
+	int saved_channel[MAX_CARDS];
+	int saved_frequency[MAX_CARDS];
+	int restore_channel_mode;
+	int restore_freq_mode;
+	int hopping_was_active;
+	int new_channel;
+	int new_frequency;
+	pid_t child_pid;
+	int status;
+	int launched_any = 0;
+
+	if (lopt.p_selected_ap == NULL)
+	{
+		snprintf(lopt.message,
+				 sizeof(lopt.message),
+				 "][ no AP selected");
+		return (0);
+	}
+
+	ap_cur = lopt.p_selected_ap;
+	format_mac(apmac, sizeof(apmac), ap_cur->bssid);
+
+	if (g_wi == NULL || g_wi[0] == NULL)
+	{
+		snprintf(lopt.message,
+				 sizeof(lopt.message),
+				 "][ no wireless interface available");
+		return (0);
+	}
+
+	ifname = wi_get_ifname(g_wi[0]);
+	if (ifname == NULL)
+	{
+		snprintf(lopt.message,
+				 sizeof(lopt.message),
+				 "][ unable to resolve wireless interface name");
+		return (0);
+	}
+
+	strlcpy(wlan_if, ifname, sizeof(wlan_if));
+
+	for (i = 0; i < MAX_CARDS; i++)
+	{
+		saved_channel[i] = lopt.channel[i];
+		saved_frequency[i] = lopt.frequency[i];
+		wi[i] = NULL;
+	}
+	for (i = 0; i < lopt.num_cards; i++)
+		wi[i] = g_wi[i];
+
+	restore_channel_mode = lopt.singlechan;
+	restore_freq_mode = lopt.singlefreq;
+	hopping_was_active = (hopper_pid > 0);
+	new_channel = ap_cur->channel;
+	new_frequency = 0;
+	if (hopping_was_active)
+		stop_hopper();
+
+	if (lopt.freqoption)
+	{
+		new_frequency = channel_to_frequency(ap_cur->channel);
+		if (new_frequency <= 0)
+		{
+			snprintf(lopt.message,
+					 sizeof(lopt.message),
+					 "][ unable to map AP channel to frequency");
+			goto restore_state;
+		}
+	}
+
+	lopt.singlechan = 0;
+	lopt.singlefreq = 0;
+
+	for (i = 0; i < lopt.num_cards; i++)
+	{
+		int ret = 0;
+
+		if (lopt.freqoption)
+		{
+#ifdef CONFIG_LIBNL
+			ret = wi_set_freq_ax(wi[i],
+								 new_frequency,
+								 lopt.ax_bw,
+								 lopt.c_seg0,
+								 lopt.c_seg1);
+#else
+			ret = wi_set_freq(wi[i], new_frequency);
+#endif
+			if (ret != 0)
+			{
+				snprintf(lopt.message,
+						 sizeof(lopt.message),
+						 "][ failed to tune %s to AP frequency",
+						 wi_get_ifname(wi[i]));
+				goto restore_state;
+			}
+			lopt.frequency[i] = new_frequency;
+		}
+		else
+		{
+#ifdef CONFIG_LIBNL
+			ret = wi_set_ht_channel(wi[i], new_channel, lopt.htval);
+#else
+			ret = wi_set_channel(wi[i], new_channel);
+#endif
+			if (ret != 0)
+			{
+				snprintf(lopt.message,
+						 sizeof(lopt.message),
+						 "][ failed to tune %s to AP channel",
+						 wi_get_ifname(wi[i]));
+				goto restore_state;
+			}
+			lopt.channel[i] = new_channel;
+		}
+	}
+
+	st_cur = lopt.st_1st;
+	while (st_cur != NULL)
+	{
+		if (time(NULL) - st_cur->tlast <= lopt.berlin && st_cur->base == ap_cur)
+		{
+			station_count++;
+		}
+		st_cur = st_cur->next;
+	}
+
+	if (station_count == 0)
+	{
+		snprintf(lopt.message,
+				 sizeof(lopt.message),
+				 "][ no stations for selected AP");
+		goto restore_state;
+	}
+
+	snprintf(lopt.message,
+			 sizeof(lopt.message),
+			 "][ running aireplay-ng for %d station%s",
+			 station_count,
+			 (station_count == 1) ? "" : "s");
+	append_tui_message_history(lopt.message, time(NULL));
+	if (use_ncurses_tui)
+		render_output_view(0);
+	else
+	{
+		printf("%s\n", lopt.message);
+		fflush(stdout);
+	}
+	launched_any = 1;
+
+	st_cur = lopt.st_1st;
+	while (st_cur != NULL)
+	{
+		if (time(NULL) - st_cur->tlast <= lopt.berlin && st_cur->base == ap_cur)
+		{
+			int pipefd[2];
+			pid_t child_pid;
+
+			format_mac(stmac, sizeof(stmac), st_cur->stmac);
+			snprintf(lopt.message,
+					 sizeof(lopt.message),
+					 "][ aireplay-ng %s",
+					 stmac);
+			append_tui_message_history(lopt.message, time(NULL));
+			if (use_ncurses_tui)
+				render_output_view(0);
+			else
+			{
+				printf("%s\n", lopt.message);
+				fflush(stdout);
+			}
+
+			if (pipe(pipefd) < 0)
+			{
+				perror("pipe");
+				snprintf(lopt.message,
+						 sizeof(lopt.message),
+						 "][ failed to capture aireplay-ng output");
+				goto restore_state;
+			}
+
+			child_pid = fork();
+			if (child_pid < 0)
+			{
+				perror("fork");
+				close(pipefd[0]);
+				close(pipefd[1]);
+				snprintf(lopt.message,
+						 sizeof(lopt.message),
+						 "][ failed to launch aireplay-ng");
+				goto restore_state;
+			}
+
+			if (child_pid == 0)
+			{
+				close(pipefd[0]);
+				if (dup2(pipefd[1], STDOUT_FILENO) < 0
+					|| dup2(pipefd[1], STDERR_FILENO) < 0)
+				{
+					perror("dup2");
+					_exit(127);
+				}
+				close(pipefd[1]);
+				execlp("aireplay-ng",
+					   "aireplay-ng",
+					   "-0",
+					   "1",
+					   "-a",
+					   apmac,
+					   "-c",
+					   stmac,
+					   wlan_if,
+					   (char *) NULL);
+				perror("aireplay-ng");
+				_exit(127);
+			}
+
+			close(pipefd[1]);
+			{
+				char read_buf[512];
+				char line_buf[1024];
+				size_t line_len = 0;
+				ssize_t nread;
+
+				while ((nread = read(pipefd[0], read_buf, sizeof(read_buf))) > 0)
+				{
+					ssize_t i;
+
+					for (i = 0; i < nread; i++)
+					{
+						unsigned char ch = (unsigned char) read_buf[i];
+
+						if (ch == '\n' || ch == '\r')
+						{
+							if (line_len > 0)
+							{
+								line_buf[line_len] = '\0';
+								if (use_ncurses_tui)
+								{
+									append_tui_message_history(line_buf, time(NULL));
+									render_output_view(0);
+								}
+								else
+								{
+									printf("%s\n", line_buf);
+									fflush(stdout);
+								}
+								line_len = 0;
+							}
+							continue;
+						}
+
+						if (line_len + 1 >= sizeof(line_buf))
+						{
+							line_buf[line_len] = '\0';
+							if (use_ncurses_tui)
+							{
+								append_tui_message_history(line_buf, time(NULL));
+								render_output_view(0);
+							}
+							else
+							{
+								printf("%s\n", line_buf);
+								fflush(stdout);
+							}
+							line_len = 0;
+						}
+
+						line_buf[line_len++] = (char) ch;
+					}
+				}
+
+				if (line_len > 0)
+				{
+					line_buf[line_len] = '\0';
+					if (use_ncurses_tui)
+					{
+						append_tui_message_history(line_buf, time(NULL));
+						render_output_view(0);
+					}
+					else
+					{
+						printf("%s\n", line_buf);
+						fflush(stdout);
+					}
+				}
+			}
+
+			close(pipefd[0]);
+			while (waitpid(child_pid, &status, 0) < 0)
+			{
+				if (errno != EINTR)
+					break;
+			}
+		}
+		st_cur = st_cur->next;
+	}
+
+	snprintf(lopt.message,
+			 sizeof(lopt.message),
+			 "][ log_sta complete");
+	if (use_ncurses_tui)
+		render_output();
+	else
+	{
+		printf("%s\n", lopt.message);
+		fflush(stdout);
+	}
+
+restore_state:
+	for (i = 0; i < lopt.num_cards; i++)
+	{
+		if (lopt.freqoption)
+		{
+#ifdef CONFIG_LIBNL
+			wi_set_freq_ax(wi[i],
+						   saved_frequency[i],
+						   lopt.ax_bw,
+						   lopt.c_seg0,
+						   lopt.c_seg1);
+#else
+			wi_set_freq(wi[i], saved_frequency[i]);
+#endif
+			lopt.frequency[i] = saved_frequency[i];
+		}
+		else
+		{
+#ifdef CONFIG_LIBNL
+			wi_set_ht_channel(wi[i], saved_channel[i], lopt.htval);
+#else
+			wi_set_channel(wi[i], saved_channel[i]);
+#endif
+			lopt.channel[i] = saved_channel[i];
+		}
+	}
+	lopt.singlechan = restore_channel_mode;
+	lopt.singlefreq = restore_freq_mode;
+
+	if (hopping_was_active)
+	{
+		if (lopt.freqoption && restore_freq_mode == 0)
+		{
+			child_pid = fork();
+			if (child_pid == 0)
+			{
+				int j;
+				char ifnam[64];
+
+				for (j = 0; j < lopt.num_cards; j++)
+				{
+					strlcpy(ifnam, wi_get_ifname(wi[j]), sizeof(ifnam));
+
+					wi_close(wi[j]);
+					wi[j] = wi_open(ifnam);
+					if (!wi[j])
+					{
+						printf("Can't reopen %s\n", ifnam);
+						exit(EXIT_FAILURE);
+					}
+				}
+
+				if (setuid(getuid()) == -1)
+				{
+					perror("setuid");
+				}
+
+				frequency_hopper(wi, lopt.num_cards, getfreqcount(0), main_pid);
+				exit(EXIT_FAILURE);
+			}
+			else if (child_pid > 0)
+			{
+				hopper_pid = child_pid;
+			}
+		}
+		else if (!lopt.freqoption && restore_channel_mode == 0)
+		{
+			child_pid = fork();
+			if (child_pid == 0)
+			{
+				int j;
+				char ifnam[64];
+
+				for (j = 0; j < lopt.num_cards; j++)
+				{
+					strlcpy(ifnam, wi_get_ifname(wi[j]), sizeof(ifnam));
+
+					wi_close(wi[j]);
+					wi[j] = wi_open(ifnam);
+					if (!wi[j])
+					{
+						printf("Can't reopen %s\n", ifnam);
+						exit(EXIT_FAILURE);
+					}
+				}
+
+				if (setuid(getuid()) == -1)
+				{
+					perror("setuid");
+				}
+
+				channel_hopper(wi, lopt.num_cards, getchancount(0), main_pid);
+				exit(EXIT_FAILURE);
+			}
+			else if (child_pid > 0)
+			{
+				hopper_pid = child_pid;
+			}
+		}
+	}
+
+	return (launched_any);
 }
 
 static void color_off(void)
@@ -4118,29 +4547,105 @@ static struct AP_info * find_visible_ap_from_tail(void)
 	return (ap_cur);
 }
 
-static struct AP_info * find_visible_ap_next(struct AP_info * ap_cur)
+static struct AP_info * find_tui_visible_ap_relative(struct AP_info * current, int direction)
 {
-	if (ap_cur == NULL) return (find_visible_ap_from_tail());
-	ap_cur = ap_cur->next;
-	while (ap_cur != NULL && IsAp2BeSkipped(ap_cur))
-		ap_cur = ap_cur->next;
-	if (ap_cur == NULL && has_unassociated_clients())
-		return (find_unassociated_ap());
-	return (ap_cur);
+	struct AP_info * ap_cur;
+	struct AP_info * ap_rows[4096];
+	size_t ap_count = 0;
+	size_t i;
+
+	if (current == NULL) return (NULL);
+	if (direction == 0) return (current);
+
+	ap_cur = lopt.ap_end;
+	while (ap_cur != NULL && ap_count < sizeof(ap_rows) / sizeof(ap_rows[0]))
+	{
+		if (!IsAp2BeSkipped(ap_cur))
+			ap_rows[ap_count++] = ap_cur;
+		ap_cur = ap_cur->prev;
+	}
+
+	if (has_unassociated_clients() && ap_count < sizeof(ap_rows) / sizeof(ap_rows[0]))
+	{
+		ap_cur = find_unassociated_ap();
+		if (ap_cur != NULL)
+			ap_rows[ap_count++] = ap_cur;
+	}
+
+	for (i = 0; i < ap_count; i++)
+	{
+		if (ap_rows[i] == current)
+		{
+			if (direction < 0)
+			{
+				if (i == 0) return (NULL);
+				return (ap_rows[i - 1]);
+			}
+			if (i + 1 >= ap_count) return (NULL);
+			return (ap_rows[i + 1]);
+		}
+	}
+
+	return (NULL);
 }
 
-static struct AP_info * find_visible_ap_prev(struct AP_info * ap_cur)
+static void record_tui_message_history(void)
 {
-	if (ap_cur == NULL) return (find_visible_ap_from_head());
-	ap_cur = ap_cur->prev;
-	while (ap_cur != NULL && IsAp2BeSkipped(ap_cur))
-		ap_cur = ap_cur->prev;
-	if (ap_cur == NULL && has_unassociated_clients())
-		return (find_unassociated_ap());
-	return (ap_cur);
+	const char * message = lopt.message;
+	char normalized[sizeof(tui_message_history_last)];
+	size_t used = 0;
+
+	if (message == NULL) return;
+	while (*message != '\0'
+		   && (*message == ']' || *message == '[' || isspace((unsigned char) *message)))
+	{
+		message++;
+	}
+	if (*message == '\0') return;
+
+	while (message[used] != '\0' && used + 1 < sizeof(normalized))
+	{
+		normalized[used] = message[used];
+		used++;
+	}
+	while (used > 0 && isspace((unsigned char) normalized[used - 1]))
+		used--;
+	normalized[used] = '\0';
+
+	if (normalized[0] == '\0') return;
+	if (strstr(normalized, "Are you sure you want to quit? Press Q again to quit.") != NULL)
+		return;
+	if (strcmp(normalized, tui_message_history_last) == 0) return;
+
+	strlcpy(tui_message_history_last, normalized, sizeof(tui_message_history_last));
+	append_tui_message_history(normalized, time(NULL));
+}
+
+static void append_tui_message_history(const char * message, time_t timestamp)
+{
+	if (message == NULL || *message == '\0') return;
+
+	if (tui_message_history_count == AIRODUMP_TUI_MESSAGE_HISTORY)
+	{
+		memmove(tui_message_history,
+				tui_message_history + 1,
+				(AIRODUMP_TUI_MESSAGE_HISTORY - 1) * sizeof(tui_message_history[0]));
+		tui_message_history_count = AIRODUMP_TUI_MESSAGE_HISTORY - 1;
+	}
+
+	tui_message_history[tui_message_history_count].timestamp = timestamp;
+	strlcpy(tui_message_history[tui_message_history_count].text,
+			message,
+			sizeof(tui_message_history[tui_message_history_count].text));
+	tui_message_history_count++;
 }
 
 static void render_output(void)
+{
+	render_output_view(1);
+}
+
+static void render_output_view(int record_message_history)
 {
 	if (use_ncurses_tui)
 	{
@@ -4174,6 +4679,10 @@ static void render_output(void)
 		view.sort_by = lopt.sort_by;
 		view.sort_inv = lopt.sort_inv;
 
+		if (record_message_history)
+			record_tui_message_history();
+		view.messages = tui_message_history;
+		view.message_count = tui_message_history_count;
 		airodump_tui_render(&tui_state, &view);
 	}
 	else
@@ -4196,14 +4705,57 @@ static void restore_terminal(void)
 
 }
 
+static int tui_message_pane_visible(void)
+{
+	return (use_ncurses_tui && lopt.show_ap && tui_state.cols >= 90);
+}
+
+static void cycle_tui_focus(int direction)
+{
+	int order[3];
+	int count = 0;
+	int i;
+
+	if (lopt.show_ap)
+		order[count++] = 0;
+	if (tui_message_pane_visible())
+		order[count++] = 2;
+	if (lopt.show_sta)
+		order[count++] = 1;
+	if (count == 0) return;
+
+	for (i = 0; i < count; i++)
+	{
+		if (order[i] == tui_state.focus)
+		{
+			i = (i + direction + count) % count;
+			set_tui_focus(order[i]);
+			return;
+		}
+	}
+
+	set_tui_focus(order[0]);
+}
+
 static void set_tui_focus(int focus)
 {
 #ifdef HAVE_NCURSES
 	if (!use_ncurses_tui) return;
-	if (lopt.show_ap == 1 && lopt.show_sta == 1)
-		tui_state.focus = (focus != 0) ? 1 : 0;
+	if (tui_message_pane_visible())
+	{
+		if (focus < 0) focus = 0;
+		if (focus > 2) focus = 2;
+		if (focus == 2 && !tui_message_pane_visible()) focus = 0;
+	}
+	else if (lopt.show_ap == 1 && lopt.show_sta == 1)
+	{
+		focus = (focus != 0) ? 1 : 0;
+	}
 	else
-		tui_state.focus = (lopt.show_sta == 1) ? 1 : 0;
+	{
+		focus = (lopt.show_sta == 1) ? 1 : 0;
+	}
+	tui_state.focus = focus;
 #else
 	UNUSED_PARAM(focus);
 #endif
@@ -4364,14 +4916,38 @@ static int handle_keycode(int keycode)
 		}
 	}
 
+	if (keycode == KEY_d)
+	{
+		log_sta_event_ts = time(NULL);
+
+		if (++log_sta_launching > 1) //-V1051
+		{
+			log_sta_launching = 0;
+			launch_log_sta();
+			redraw = 1;
+		}
+			else
+			{
+				snprintf(lopt.message,
+						 sizeof(lopt.message),
+						 "][ Are you sure you want to run log_sta? Press d again to continue.");
+				redraw = 1;
+			}
+		}
+
 	if (keycode == KEY_ARROW_DOWN)
 	{
-		if (use_ncurses_tui && tui_state.focus == 1)
+		if (!use_ncurses_tui && tui_state.focus == 1)
 		{
 			tui_state.sta_scroll++;
 			redraw = 1;
 		}
-		else if (lopt.p_selected_ap && lopt.p_selected_ap->prev)
+		else if (!use_ncurses_tui && tui_state.focus == 2)
+		{
+			tui_state.msg_scroll++;
+			redraw = 1;
+		}
+		else if (!use_ncurses_tui && lopt.p_selected_ap && lopt.p_selected_ap->prev)
 		{
 			lopt.p_selected_ap = lopt.p_selected_ap->prev;
 			lopt.en_selection_direction = selection_direction_down;
@@ -4381,12 +4957,17 @@ static int handle_keycode(int keycode)
 
 	if (keycode == KEY_ARROW_UP)
 	{
-		if (use_ncurses_tui && tui_state.focus == 1)
+		if (!use_ncurses_tui && tui_state.focus == 1)
 		{
 			if (tui_state.sta_scroll > 0) tui_state.sta_scroll--;
 			redraw = 1;
 		}
-		else if (lopt.p_selected_ap && lopt.p_selected_ap->next)
+		else if (!use_ncurses_tui && tui_state.focus == 2)
+		{
+			if (tui_state.msg_scroll > 0) tui_state.msg_scroll--;
+			redraw = 1;
+		}
+		else if (!use_ncurses_tui && lopt.p_selected_ap && lopt.p_selected_ap->next)
 		{
 			lopt.p_selected_ap = lopt.p_selected_ap->next;
 			lopt.en_selection_direction = selection_direction_up;
@@ -4412,7 +4993,7 @@ static int handle_keycode(int keycode)
 	{
 		if (use_ncurses_tui)
 		{
-			set_tui_focus((tui_state.focus == 0) ? 1 : 0);
+			cycle_tui_focus(1);
 			redraw = 1;
 		}
 		else if (lopt.p_selected_ap == NULL)
@@ -4491,7 +5072,7 @@ static int handle_keycode(int keycode)
 		}
 	}
 
-	if (keycode == KEY_d)
+	if (keycode == KEY_c)
 	{
 		if (use_ncurses_tui)
 		{
@@ -4500,10 +5081,8 @@ static int handle_keycode(int keycode)
 			memset(lopt.selected_bssid, '\x00', 6);
 			tui_state.ap_scroll = 0;
 			tui_state.sta_scroll = 0;
+			tui_state.msg_scroll = 0;
 			tui_state.focus = 0;
-			snprintf(lopt.message,
-					 sizeof(lopt.message),
-					 "][ cleared AP selection");
 		}
 		else
 		{
@@ -4520,12 +5099,12 @@ static int handle_keycode(int keycode)
 	{
 		if (keycode == KEY_LEFT)
 		{
-			set_tui_focus(0);
+			cycle_tui_focus(-1);
 			redraw = 1;
 		}
 		if (keycode == KEY_RIGHT)
 		{
-			set_tui_focus(1);
+			cycle_tui_focus(1);
 			redraw = 1;
 		}
 		if (keycode == KEY_RESIZE)
@@ -4540,9 +5119,14 @@ static int handle_keycode(int keycode)
 				if (tui_state.sta_scroll > 0) tui_state.sta_scroll--;
 				redraw = 1;
 			}
+			else if (tui_state.focus == 2)
+			{
+				if (tui_state.msg_scroll > 0) tui_state.msg_scroll--;
+				redraw = 1;
+			}
 			else if (lopt.p_selected_ap != NULL)
 			{
-				struct AP_info * next_ap = find_visible_ap_next(lopt.p_selected_ap);
+				struct AP_info * next_ap = find_tui_visible_ap_relative(lopt.p_selected_ap, -1);
 
 				if (next_ap != NULL)
 				{
@@ -4570,9 +5154,14 @@ static int handle_keycode(int keycode)
 				tui_state.sta_scroll++;
 				redraw = 1;
 			}
+			else if (tui_state.focus == 2)
+			{
+				tui_state.msg_scroll++;
+				redraw = 1;
+			}
 			else if (lopt.p_selected_ap != NULL)
 			{
-				struct AP_info * prev_ap = find_visible_ap_prev(lopt.p_selected_ap);
+				struct AP_info * prev_ap = find_tui_visible_ap_relative(lopt.p_selected_ap, 1);
 
 				if (prev_ap != NULL)
 				{
@@ -4600,6 +5189,11 @@ static int handle_keycode(int keycode)
 				tui_state.sta_scroll -= MAX(1, tui_state.sta_visible_rows);
 				if (tui_state.sta_scroll < 0) tui_state.sta_scroll = 0;
 			}
+			else if (tui_state.focus == 2)
+			{
+				tui_state.msg_scroll -= MAX(1, tui_state.msg_visible_rows);
+				if (tui_state.msg_scroll < 0) tui_state.msg_scroll = 0;
+			}
 			else
 			{
 				tui_state.ap_scroll -= MAX(1, tui_state.ap_visible_rows);
@@ -4611,6 +5205,8 @@ static int handle_keycode(int keycode)
 		{
 			if (tui_state.focus == 1)
 				tui_state.sta_scroll += MAX(1, tui_state.sta_visible_rows);
+			else if (tui_state.focus == 2)
+				tui_state.msg_scroll += MAX(1, tui_state.msg_visible_rows);
 			else
 				tui_state.ap_scroll += MAX(1, tui_state.ap_visible_rows);
 			redraw = 1;
@@ -4619,6 +5215,8 @@ static int handle_keycode(int keycode)
 		{
 			if (tui_state.focus == 1)
 				tui_state.sta_scroll = 0;
+			else if (tui_state.focus == 2)
+				tui_state.msg_scroll = 0;
 			else
 			{
 				lopt.p_selected_ap = find_visible_ap_from_head();
@@ -4630,6 +5228,8 @@ static int handle_keycode(int keycode)
 		{
 			if (tui_state.focus == 1)
 				tui_state.sta_scroll = INT_MAX / 4;
+			else if (tui_state.focus == 2)
+				tui_state.msg_scroll = INT_MAX / 4;
 			else
 				lopt.p_selected_ap = find_visible_ap_from_tail();
 			redraw = 1;
@@ -6566,6 +7166,40 @@ static int channel_to_frequency_ax(int channel) {
     return -1; // Channel not found, return invalid
 }
 
+static int channel_to_frequency(int channel)
+{
+	int i;
+
+	for (i = 0; channel_frequency_map_bg[i] != -1; i += 2)
+	{
+		if (channel_frequency_map_bg[i] == channel)
+			return (channel_frequency_map_bg[i + 1]);
+	}
+
+	for (i = 0; channel_frequency_map_a[i] != -1; i += 2)
+	{
+		if (channel_frequency_map_a[i] == channel)
+			return (channel_frequency_map_a[i + 1]);
+	}
+
+	return (channel_to_frequency_ax(channel));
+}
+
+static void stop_hopper(void)
+{
+	int status;
+
+	if (hopper_pid <= 0) return;
+
+	kill(hopper_pid, SIGTERM);
+	while (waitpid(hopper_pid, &status, 0) < 0)
+	{
+		if (errno != EINTR)
+			break;
+	}
+	hopper_pid = -1;
+}
+
 // Function to convert channel array to frequency string
 static void channels_to_freq_string_ax(const int *channels, char *freq_string) {
     //char buffer[MAX_FREQ_STR_LEN];
@@ -7187,6 +7821,7 @@ int main(int argc, char * argv[])
 
 	struct wif * wi[MAX_CARDS];
 	struct rx_info ri;
+	g_wi = wi;
 	
 	unsigned char tmpbuf[4096];
 	unsigned char buffer[4096];
@@ -7251,7 +7886,7 @@ int main(int argc, char * argv[])
 		   {"cseg1", 1, 0, '1'},
 		   {0, 0, 0, 0}};
 
-	pid_t main_pid = getpid();
+	main_pid = getpid();
 
 	console_utf8_enable();
 	ac_crypto_init();
@@ -7341,7 +7976,7 @@ int main(int argc, char * argv[])
 	lopt.ppi = 0;
 	lopt.coordinates[0] = 0;
 	lopt.coordinates[1] = 0;
-	lopt.ip, "0.0.0.0";
+	strlcpy(lopt.ip, "0.0.0.0", sizeof(lopt.ip));
 	lopt.port = 23456;
 	lopt.tcp_sock_fd = -1;
 	lopt.ax_bw = 0; // can be 4 (40MHz), 8 (80MHz), 9 (80+80), 6 (160MHz)
@@ -8196,7 +8831,8 @@ int main(int argc, char * argv[])
 				if (sigaction(SIGUSR1, &action, NULL) == -1)
 					perror("sigaction(SIGUSR1)");
 
-				if (!fork())
+				hopper_pid = fork();
+				if (hopper_pid == 0)
 				{
 					/* reopen cards.  This way parent & child don't share
 					* resources for
@@ -8223,6 +8859,11 @@ int main(int argc, char * argv[])
 					}
 
 					frequency_hopper(wi, lopt.num_cards, freq_count, main_pid);
+					exit(EXIT_FAILURE);
+				}
+				else if (hopper_pid < 0)
+				{
+					perror("fork");
 					exit(EXIT_FAILURE);
 				}
 			}
@@ -8264,7 +8905,8 @@ int main(int argc, char * argv[])
 				if (sigaction(SIGUSR1, &action, NULL) == -1)
 					perror("sigaction(SIGUSR1)");
 
-				if (!fork())
+				hopper_pid = fork();
+				if (hopper_pid == 0)
 				{
 					/* reopen cards.  This way parent & child don't share
 					* resources for
@@ -8291,6 +8933,11 @@ int main(int argc, char * argv[])
 					}
 
 					channel_hopper(wi, lopt.num_cards, chan_count, main_pid);
+					exit(EXIT_FAILURE);
+				}
+				else if (hopper_pid < 0)
+				{
+					perror("fork");
 					exit(EXIT_FAILURE);
 				}
 			}
@@ -8899,6 +9546,13 @@ int main(int argc, char * argv[])
 		{
 			quitting_event_ts = 0;
 			quitting = 0;
+			snprintf(lopt.message, sizeof(lopt.message), "]");
+		}
+
+		if (log_sta_launching && time(NULL) - log_sta_event_ts > 3)
+		{
+			log_sta_event_ts = 0;
+			log_sta_launching = 0;
 			snprintf(lopt.message, sizeof(lopt.message), "]");
 		}
 	}
