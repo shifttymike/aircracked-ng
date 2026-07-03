@@ -75,6 +75,33 @@ static const char * sort_field_label(int sort_by)
 	}
 }
 
+static const char * station_sort_field_label(int sort_by)
+{
+	switch (sort_by)
+	{
+		case STA_SORT_BY_NOTHING:
+			return ("none");
+		case STA_SORT_BY_BSSID:
+			return ("BSSID");
+		case STA_SORT_BY_STATION:
+			return ("station MAC");
+		case STA_SORT_BY_POWER:
+			return ("power");
+		case STA_SORT_BY_RATE:
+			return ("rate");
+		case STA_SORT_BY_LOST:
+			return ("lost");
+		case STA_SORT_BY_FRAMES:
+			return ("frames");
+		case STA_SORT_BY_NOTES:
+			return ("notes");
+		case STA_SORT_BY_PROBES:
+			return ("probes");
+		default:
+			return ("first seen");
+	}
+}
+
 static int ap_visible(const struct AP_info * ap, const struct airodump_tui_view * view)
 {
 	REQUIRE(ap != NULL);
@@ -238,50 +265,57 @@ static size_t collect_visible_stations(struct ST_info * st_1st,
 
 				switch (sort_by)
 				{
-					case SORT_BY_BSSID:
+					case STA_SORT_BY_BSSID:
+						if (lhs->base != NULL && rhs->base != NULL)
+							cmp = memcmp(lhs->base->bssid, rhs->base->bssid, 6);
+						else if (lhs->base != NULL)
+							cmp = 1;
+						else if (rhs->base != NULL)
+							cmp = -1;
+						else
+							cmp = 0;
+						break;
+					case STA_SORT_BY_STATION:
 						cmp = memcmp(lhs->stmac, rhs->stmac, 6);
 						break;
-					case SORT_BY_POWER:
+					case STA_SORT_BY_POWER:
 						cmp = lhs->power - rhs->power;
 						break;
-					case SORT_BY_BEACON:
-					case SORT_BY_DATA:
+					case STA_SORT_BY_RATE:
+						cmp = MAX(lhs->rate_to, lhs->rate_from)
+							  - MAX(rhs->rate_to, rhs->rate_from);
+						break;
+					case STA_SORT_BY_LOST:
+						cmp = lhs->missed - rhs->missed;
+						break;
+					case STA_SORT_BY_FRAMES:
 						cmp = (int) lhs->nb_pkt - (int) rhs->nb_pkt;
 						break;
-					case SORT_BY_PRATE:
-						cmp = (MAX(lhs->rate_to, lhs->rate_from)
-							   - MAX(rhs->rate_to, rhs->rate_from));
+					case STA_SORT_BY_NOTES:
+					{
+						int lhs_note = (lhs->wpa.pmkid[0] != 0)
+										   ? 2
+										   : (lhs->wpa.state == 7 ? 1 : 0);
+						int rhs_note = (rhs->wpa.pmkid[0] != 0)
+										   ? 2
+										   : (rhs->wpa.state == 7 ? 1 : 0);
+						cmp = lhs_note - rhs_note;
 						break;
-					case SORT_BY_CHAN:
-						cmp = lhs->channel - rhs->channel;
+					}
+					case STA_SORT_BY_PROBES:
+					{
+						int lhs_count = 0;
+						int rhs_count = 0;
+						int k;
+
+						for (k = 0; k < NB_PRB; k++)
+						{
+							if (lhs->ssid_length[k] > 0) lhs_count++;
+							if (rhs->ssid_length[k] > 0) rhs_count++;
+						}
+						cmp = lhs_count - rhs_count;
 						break;
-					case SORT_BY_MBIT:
-						cmp = (MAX(lhs->rate_to, lhs->rate_from)
-							   - MAX(rhs->rate_to, rhs->rate_from));
-						break;
-					case SORT_BY_ENC:
-						cmp = (lhs->base != NULL ? (int) (lhs->base->security & STD_FIELD)
-												 : 0)
-							  - (rhs->base != NULL ? (int) (rhs->base->security & STD_FIELD)
-												   : 0);
-						break;
-					case SORT_BY_CIPHER:
-						cmp = (lhs->base != NULL ? (int) (lhs->base->security & ENC_FIELD)
-												 : 0)
-							  - (rhs->base != NULL ? (int) (rhs->base->security & ENC_FIELD)
-												   : 0);
-						break;
-					case SORT_BY_AUTH:
-						cmp = (lhs->base != NULL ? (int) (lhs->base->security & AUTH_FIELD)
-												 : 0)
-							  - (rhs->base != NULL ? (int) (rhs->base->security & AUTH_FIELD)
-												   : 0);
-						break;
-					case SORT_BY_ESSID:
-						cmp = strncasecmp((const char *) lhs->essid,
-										  (const char *) rhs->essid,
-										  ESSID_LENGTH);
-						break;
+					}
 					default:
 						cmp = lhs->tinit > rhs->tinit ? 1 : (lhs->tinit < rhs->tinit ? -1 : 0);
 						break;
@@ -1068,7 +1102,7 @@ static void render_status_line(const struct airodump_tui_state * state,
 	if (state->focus == 1)
 	{
 		strlcat(line, "  STA sort:", sizeof(line));
-		strlcat(line, sort_field_label(state->sta_sort_by), sizeof(line));
+		strlcat(line, station_sort_field_label(state->sta_sort_by), sizeof(line));
 	}
 	else
 	{

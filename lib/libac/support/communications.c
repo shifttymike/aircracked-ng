@@ -948,6 +948,7 @@ int capture_ask_packet(int * caplen, int just_grab)
 #define AIRODUMP_NG_GPS_EXT "gps"
 #define AIRODUMP_NG_CAP_EXT "cap"
 #define AIRODUMP_NG_LOG_CSV_EXT "log.csv"
+#define AIRODUMP_NG_PROBES_EXT "probes.txt"
 
 static const char * f_ext[] = {AIRODUMP_NG_CSV_EXT,
 							   AIRODUMP_NG_GPS_EXT,
@@ -955,7 +956,8 @@ static const char * f_ext[] = {AIRODUMP_NG_CSV_EXT,
 							   IVS2_EXTENSION,
 							   KISMET_CSV_EXT,
 							   KISMET_NETXML_EXT,
-							   AIRODUMP_NG_LOG_CSV_EXT};
+							   AIRODUMP_NG_LOG_CSV_EXT,
+							   AIRODUMP_NG_PROBES_EXT};
 
 /* setup the output files */
 int dump_initialize_multi_format(char * prefix, int ivs_only, int ppi, int *tcp_sock_fd)
@@ -1049,6 +1051,30 @@ int dump_initialize_multi_format(char * prefix, int ivs_only, int ppi, int *tcp_
 				"LocalTime, GPSTime, ESSID, BSSID, Power, "
 				"Security, Latitude, Longitude, Latitude Error, "
 				"Longitude Error, Type\r\n");
+	}
+
+	/* create the output distinct probes text file */
+	if (opt.output_format_probes)
+	{
+		memset(ofn, 0, ofn_len);
+		snprintf(ofn,
+				 ofn_len,
+				 "%s-%02d.%s",
+				 prefix,
+				 opt.f_index,
+				 AIRODUMP_NG_PROBES_EXT);
+
+		if ((opt.f_probes = fopen(ofn, "wb+")) == NULL)
+		{
+			perror("fopen failed");
+			fprintf(stderr, "Could not create \"%s\".\n", ofn);
+			free(ofn);
+
+			return (1);
+		}
+
+		setvbuf(opt.f_probes, NULL, _IOLBF, 0);
+		fprintf(opt.f_probes, "# First seen\tStation MAC\tProbe ESSID\r\n");
 	}
 
 	/* create the output Kismet CSV file */

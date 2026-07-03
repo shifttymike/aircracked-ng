@@ -624,6 +624,14 @@ static struct AP_info * pick_ap_from_mouse(int x, int y);
 static void set_selected_ap(struct AP_info * ap,
 							int selection_direction);
 static void cycle_tui_focus(int direction);
+static int probe_seen_globally(const unsigned char * probe, size_t len);
+static void log_distinct_probe_essid(const struct ST_info * st_cur,
+									 const unsigned char * probe,
+									 size_t len);
+static int log_sta_mfp_guard(struct AP_info * ap_cur);
+static int log_sta_is_unassociated_ap(const struct AP_info * ap_cur);
+static int log_sta_requires_mfp(const struct AP_info * ap_cur);
+static void log_sta_refuse_with_message(const char * reason);
 
 /* bunch of global stuff */
 struct communication_options opt;
@@ -1055,6 +1063,18 @@ static int launch_log_sta(void)
 
 	ap_cur = lopt.p_selected_ap;
 	format_mac(apmac, sizeof(apmac), ap_cur->bssid);
+
+	if (log_sta_is_unassociated_ap(ap_cur))
+	{
+		log_sta_refuse_with_message("selected AP is the unassociated-client entry");
+		return (0);
+	}
+
+	if (log_sta_requires_mfp(ap_cur))
+	{
+		log_sta_refuse_with_message("selected AP requires MFP");
+		return (0);
+	}
 
 	if (g_wi == NULL || g_wi[0] == NULL)
 	{
@@ -1603,6 +1623,7 @@ static const char usage[] =
 	"                  <formats> : Output format. Possible values:\n"
 	"                              pcap, ivs, csv, gps, kismet, netxml, "
 	"logcsv\n"
+	"      -P / --probes         : Log distinct probes to a live text file\n"
 	"      --ignore-negative-one : Removes the message that says\n"
 	"                              fixed channel <interface>: -1\n"
 	"      --write-interval\n"
@@ -2543,6 +2564,7 @@ skip_station:
 				&& (p[1] > 1 || p[2] != ' '))
 			{
 				n = MIN(ESSID_LENGTH, p[1]);
+				int is_new_probe;
 
 				for (i = 0; i < n; i++)
 					if (p[2 + i] > 0 && p[2 + i] < ' ') goto skip_probe;
@@ -2553,6 +2575,8 @@ skip_station:
 				for (i = 0; i < NB_PRB; i++)
 					if (memcmp(st_cur->probes[i], p + 2, n) == 0)
 						goto skip_probe;
+
+				is_new_probe = !probe_seen_globally((const unsigned char *) (p + 2), (size_t) n);
 
 				st_cur->probe_index = (st_cur->probe_index + 1) % NB_PRB;
 				memset(st_cur->probes[st_cur->probe_index], 0, 256);
@@ -2569,6 +2593,13 @@ skip_station:
 						if (c < 32) c = '.';
 						st_cur->probes[st_cur->probe_index][i] = c;
 					}
+
+				if (is_new_probe)
+				{
+					log_distinct_probe_essid(st_cur,
+											 (const unsigned char *) st_cur->probes[st_cur->probe_index],
+											 (size_t) st_cur->ssid_length[st_cur->probe_index]);
+				}
 			}
 
 			p += 2 + p[1];
@@ -3088,9 +3119,9 @@ skip_probe:
 				}
 				else
 				{
-					if (p + (4 * numuni) + (2 + 4 * numauth) + 2
-						> h80211 + caplen)
-						break;
+				if (p + (4 * numuni) + (2 + 4 * numauth) + 2
+					> h80211 + caplen)
+					break;
 				}
 
 				// Get the list of cipher suites
@@ -3155,6 +3186,26 @@ skip_probe:
 							break;
 						default:
 							break;
+					}
+				}
+
+				if (type == 0x30)
+				{
+					const unsigned char * rsn_cap = p + 2 + 4 * numauth;
+
+					if (rsn_cap + 2 <= h80211 + caplen)
+					{
+						unsigned short rsn_caps
+							= (unsigned short) (rsn_cap[0]
+												| ((unsigned short) rsn_cap[1] << 8));
+
+						if (rsn_caps & 0x0080)
+							ap_cur->mfp_capable = 1;
+						if (rsn_caps & 0x0040)
+						{
+							ap_cur->mfp_capable = 1;
+							ap_cur->mfp_required = 1;
+						}
 					}
 				}
 
@@ -4791,6 +4842,141 @@ static const char * sort_field_name(int sort_by)
 	}
 }
 
+static const char * station_sort_field_name(int sort_by)
+{
+	switch (sort_by)
+	{
+		case STA_SORT_BY_NOTHING:
+			return ("none");
+		case STA_SORT_BY_BSSID:
+			return ("BSSID");
+		case STA_SORT_BY_STATION:
+			return ("station MAC");
+		case STA_SORT_BY_POWER:
+			return ("power");
+		case STA_SORT_BY_RATE:
+			return ("rate");
+		case STA_SORT_BY_LOST:
+			return ("lost");
+		case STA_SORT_BY_FRAMES:
+			return ("frames");
+		case STA_SORT_BY_NOTES:
+			return ("notes");
+		case STA_SORT_BY_PROBES:
+			return ("probes");
+		default:
+			return ("first seen");
+	}
+}
+
+static int next_station_sort_field(int sort_by)
+{
+	if (sort_by < STA_SORT_BY_BSSID || sort_by >= STA_SORT_MAX)
+		return (STA_SORT_BY_BSSID);
+	return (sort_by + 1);
+}
+
+static int probe_seen_globally(const unsigned char * probe, size_t len)
+{
+	struct ST_info * st_cur;
+	int i;
+
+	if (probe == NULL || len == 0) return (1);
+
+	st_cur = lopt.st_1st;
+	while (st_cur != NULL)
+	{
+		for (i = 0; i < NB_PRB; i++)
+		{
+			if (st_cur->ssid_length[i] != (int) len) continue;
+			if (memcmp(st_cur->probes[i], probe, len) == 0)
+				return (1);
+		}
+		st_cur = st_cur->next;
+	}
+
+	return (0);
+}
+
+static void log_distinct_probe_essid(const struct ST_info * st_cur,
+									 const unsigned char * probe,
+									 size_t len)
+{
+	struct tm * ltime;
+
+	if (st_cur == NULL || probe == NULL || len == 0) return;
+	if (!opt.output_format_probes || opt.f_probes == NULL) return;
+	if (probe_seen_globally(probe, len)) return;
+
+	ltime = localtime(&st_cur->tlast);
+	if (ltime == NULL) return;
+
+	fprintf(opt.f_probes,
+			"%04d-%02d-%02d %02d:%02d:%02d\t%02X:%02X:%02X:%02X:%02X:%02X\t%.*s\r\n",
+			1900 + ltime->tm_year,
+			1 + ltime->tm_mon,
+			ltime->tm_mday,
+			ltime->tm_hour,
+			ltime->tm_min,
+			ltime->tm_sec,
+			st_cur->stmac[0],
+			st_cur->stmac[1],
+			st_cur->stmac[2],
+			st_cur->stmac[3],
+			st_cur->stmac[4],
+			st_cur->stmac[5],
+			(int) len,
+			(const char *) probe);
+	fflush(opt.f_probes);
+}
+
+static int log_sta_mfp_guard(struct AP_info * ap_cur)
+{
+	if (ap_cur == NULL) return (0);
+
+	if (ap_cur->mfp_required)
+	{
+		snprintf(lopt.message,
+				 sizeof(lopt.message),
+				 "][ log_sta refused: selected AP requires MFP");
+		append_tui_message_history_now(lopt.message);
+		return (0);
+	}
+
+	if (ap_cur->mfp_capable && !ap_cur->mfp_warned)
+	{
+		ap_cur->mfp_warned = 1;
+		snprintf(lopt.message,
+				 sizeof(lopt.message),
+				 "][ selected AP advertises optional MFP; log_sta may fail");
+		append_tui_message_history_now(lopt.message);
+		return (0);
+	}
+
+	return (1);
+}
+
+static int log_sta_is_unassociated_ap(const struct AP_info * ap_cur)
+{
+	return (ap_cur != NULL && memcmp(ap_cur->bssid, BROADCAST, 6) == 0);
+}
+
+static int log_sta_requires_mfp(const struct AP_info * ap_cur)
+{
+	if (ap_cur == NULL) return (0);
+
+	/* WPA3-SAE requires PMF even if the RSN capability bit was not retained. */
+	if (ap_cur->security & AUTH_SAE) return (1);
+
+	return (ap_cur->mfp_required != 0);
+}
+
+static void log_sta_refuse_with_message(const char * reason)
+{
+	snprintf(lopt.message, sizeof(lopt.message), "][ log_sta refused: %s", reason);
+	append_tui_message_history_now(lopt.message);
+}
+
 static int point_in_box(int x, int y, int top, int left, int height, int width)
 {
 	return (height > 0 && width > 0 && y >= top && y < top + height
@@ -5122,12 +5308,11 @@ static int handle_keycode(int keycode)
 	{
 		if (use_ncurses_tui && tui_state.focus == 1)
 		{
-			tui_state.sta_sort_by++;
-			if (tui_state.sta_sort_by > MAX_SORT) tui_state.sta_sort_by = 0;
+			tui_state.sta_sort_by = next_station_sort_field(tui_state.sta_sort_by);
 			snprintf(lopt.message,
 					 sizeof(lopt.message),
 					 "][ sorting stations by %s",
-					 sort_field_name(tui_state.sta_sort_by));
+					 station_sort_field_name(tui_state.sta_sort_by));
 		}
 		else
 		{
@@ -5240,20 +5425,42 @@ static int handle_keycode(int keycode)
 	{
 		log_sta_event_ts = time(NULL);
 
+		if (lopt.p_selected_ap != NULL
+			&& (log_sta_is_unassociated_ap(lopt.p_selected_ap)
+				|| log_sta_requires_mfp(lopt.p_selected_ap)))
+		{
+			log_sta_launching = 0;
+			if (log_sta_is_unassociated_ap(lopt.p_selected_ap))
+				log_sta_refuse_with_message(
+					"don't be silly");
+			else
+				log_sta_refuse_with_message("selected AP requires MFP");
+			redraw = 1;
+			goto done;
+		}
+
 		if (++log_sta_launching > 1) //-V1051
 		{
 			log_sta_launching = 0;
 			launch_log_sta();
 			redraw = 1;
 		}
+		else
+		{
+			if (lopt.p_selected_ap != NULL && lopt.p_selected_ap->mfp_capable
+				&& !lopt.p_selected_ap->mfp_warned)
+			{
+				log_sta_mfp_guard(lopt.p_selected_ap);
+			}
 			else
 			{
 				snprintf(lopt.message,
 						 sizeof(lopt.message),
 						 "][ Are you sure you want to run log_sta? Press d again to continue.");
-				redraw = 1;
 			}
+			redraw = 1;
 		}
+	}
 
 	if (keycode == KEY_ARROW_DOWN)
 	{
@@ -8709,6 +8916,7 @@ int main(int argc, char * argv[])
 		   {"coords", 1, 0, 'y'},
 		   {"target", 1, 0, 'z'},
 		   {"tcp-server", 1, 0, 'V'},
+		   {"probes", 0, 0, 'P'},
 		   {"ax40", 0, 0, '4'},
 		   {"ax80", 0, 0, '8'},
 		   {"ax80+", 0, 0, '9'},
@@ -8756,6 +8964,7 @@ int main(int argc, char * argv[])
 	opt.f_kis_xml = NULL;
 	opt.f_gps = NULL;
 	opt.f_logcsv = NULL;
+	opt.f_probes = NULL;
 	lopt.keyout = NULL;
 	opt.f_xor = NULL;
 	opt.sk_len = 0;
@@ -8793,6 +9002,7 @@ int main(int argc, char * argv[])
 	opt.output_format_kismet_csv = 1;
 	opt.output_format_kismet_netxml = 1;
 	opt.output_format_log_csv = 1;
+	opt.output_format_probes = 0;
 	lopt.gps_valid_interval
 		= 5; // If we dont get a new GPS update in 5 seconds - invalidate it
 	lopt.file_write_interval = 5; // Write file every 5 seconds by default
@@ -8912,7 +9122,7 @@ int main(int argc, char * argv[])
 		option
 			= getopt_long(argc,
 						  argv,
-						  "b:c:egiw:s:t:u:m:d:N:R:aHDB:Ahf:r:EC:o:x:MUI:WK:n:T:Xpz:y:V:",
+						  "b:c:egiw:s:t:u:m:d:N:R:aHDB:Ahf:r:EC:o:x:MUI:WK:n:T:Xpz:y:V:P",
 						  long_options,
 						  &option_index);
 
@@ -9182,6 +9392,12 @@ int main(int argc, char * argv[])
 				lopt.tcp_sock_fd = 0;
 				size_t V_len = strlen(lopt.message);
     			snprintf(lopt.message + V_len, sizeof(lopt.message) - V_len, " ][ TCP Server On %s:%d", lopt.ip, lopt.port);
+				break;
+
+			case 'P':
+
+				opt.record_data = 1;
+				opt.output_format_probes = 1;
 				break;
 
 			case 'i':
@@ -9855,6 +10071,11 @@ int main(int argc, char * argv[])
 	/* open or create the output files */
 
 	if (opt.record_data) {
+		if (lopt.dump_prefix == NULL)
+		{
+			fprintf(stderr, "Output prefix required with -w / --write.\n");
+			return (EXIT_FAILURE);
+		}
 		int ppi = lopt.ppi;
 		if (dump_initialize_multi_format(lopt.dump_prefix, ivs_only, ppi, &lopt.tcp_sock_fd))
 			return (EXIT_FAILURE);
@@ -10435,6 +10656,7 @@ int main(int argc, char * argv[])
 		if (opt.output_format_pcap && opt.f_cap != NULL) fclose(opt.f_cap);
 		if (opt.f_ivs != NULL) fclose(opt.f_ivs);
 		if (opt.f_logcsv != NULL) fclose(opt.f_logcsv);
+		if (opt.f_probes != NULL) fclose(opt.f_probes);
 	}
 
 	if (!lopt.save_gps)

@@ -155,6 +155,7 @@ struct communication_options
 	FILE * f_ivs; /* output ivs file      */
 	FILE * f_xor; /* output prga file     */
 	FILE * f_logcsv; /* output rolling AP/GPS csv log */
+	FILE * f_probes; /* output distinct probe text log */
 
 	char * f_cap_name;
 	char * prefix;
@@ -164,6 +165,7 @@ struct communication_options
 	int output_format_kismet_csv;
 	int output_format_kismet_netxml;
 	int output_format_log_csv;
+	int output_format_probes;
 
 	int usegpsd; /* do we use GPSd?      */
 	int record_data; /* do we record data?   */

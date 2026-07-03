@@ -9,6 +9,17 @@
 #include <ncurses.h>
 #endif
 
+#define STA_SORT_BY_NOTHING 0
+#define STA_SORT_BY_BSSID 1
+#define STA_SORT_BY_STATION 2
+#define STA_SORT_BY_POWER 3
+#define STA_SORT_BY_RATE 4
+#define STA_SORT_BY_LOST 5
+#define STA_SORT_BY_FRAMES 6
+#define STA_SORT_BY_NOTES 7
+#define STA_SORT_BY_PROBES 8
+#define STA_SORT_MAX 8
+
 struct airodump_tui_state
 {
 	int active;

@@ -128,6 +128,9 @@ struct AP_info
 	int power_lvl[NB_PWR]; /* signal power ring buffer */
 	int preamble; /* 0 = long, 1 = short      */
 	unsigned int security; /* ENC_*, AUTH_*, STD_*     */
+	int mfp_capable; /* RSN MFP capable bit      */
+	int mfp_required; /* RSN MFP required bit     */
+	int mfp_warned; /* log_sta warning shown    */
 	int beacon_logged; /* We need 1 beacon per AP  */
 	int dict_started; /* 1 if dict attack started */
 	int ssid_length; /* length of ssid           */
