@@ -113,6 +113,7 @@ static const char * OUI_PATHS[]
 
 static int read_pkts = 0;
 static int colors_enabled = 0;
+static int force_legacy_ui = 0;
 
 static int abg_chans[]
 	= {1,   7,   13,  2,   8,   3,   14,  9,   4,   10,  5,   11,  6,
@@ -564,8 +565,8 @@ static int * frequencies;
 
 static volatile int quitting = 0;
 static volatile time_t quitting_event_ts = 0;
-static volatile int log_sta_launching = 0;
-static volatile time_t log_sta_event_ts = 0;
+static volatile int deauth_launching = 0;
+static volatile time_t deauth_event_ts = 0;
 static volatile pid_t hopper_pid = -1;
 static int hopper_pipe_ready = 0;
 static pid_t main_pid = -1;
@@ -590,7 +591,7 @@ static void dump_print(int ws_row, int ws_col, int if_num);
 static char *
 get_manufacturer(unsigned char mac0, unsigned char mac1, unsigned char mac2);
 int is_filtered_essid(const uint8_t * essid);
-static int launch_log_sta(void);
+static int launch_deauth(void);
 static int resume_hopper(void);
 static int getchancount(int valid);
 static int getfreqcount(int valid);
@@ -628,10 +629,9 @@ static int probe_seen_globally(const unsigned char * probe, size_t len);
 static void log_distinct_probe_essid(const struct ST_info * st_cur,
 									 const unsigned char * probe,
 									 size_t len);
-static int log_sta_mfp_guard(struct AP_info * ap_cur);
-static int log_sta_is_unassociated_ap(const struct AP_info * ap_cur);
-static int log_sta_requires_mfp(const struct AP_info * ap_cur);
-static void log_sta_refuse_with_message(const char * reason);
+static int deauth_mfp_guard(struct AP_info * ap_cur);
+static int deauth_is_unassociated_ap(const struct AP_info * ap_cur);
+static void deauth_refuse_with_message(const char * reason);
 
 /* bunch of global stuff */
 struct communication_options opt;
@@ -787,6 +787,7 @@ static struct local_options
 static int normalize_tui_message(const char * message, char * out, size_t out_len)
 {
 	size_t used = 0;
+	int pending_space = 0;
 
 	if (message == NULL || out == NULL || out_len == 0) return (0);
 
@@ -795,10 +796,20 @@ static int normalize_tui_message(const char * message, char * out, size_t out_le
 	{
 		message++;
 	}
-	while (message[used] != '\0' && used + 1 < out_len)
+	while (*message != '\0' && used + 1 < out_len)
 	{
-		out[used] = message[used];
-		used++;
+		if (isspace((unsigned char) *message))
+		{
+			pending_space = (used > 0);
+		}
+		else
+		{
+			if (pending_space && used + 1 < out_len)
+				out[used++] = ' ';
+			out[used++] = *message;
+			pending_space = 0;
+		}
+		message++;
 	}
 	while (used > 0 && isspace((unsigned char) out[used - 1]))
 		used--;
@@ -1036,7 +1047,7 @@ static void format_mac(char * out, size_t out_len, const uint8_t mac[6])
 			 mac[5]);
 }
 
-static int launch_log_sta(void)
+static int launch_deauth(void)
 {
 	struct AP_info * ap_cur;
 	struct ST_info * st_cur;
@@ -1064,15 +1075,9 @@ static int launch_log_sta(void)
 	ap_cur = lopt.p_selected_ap;
 	format_mac(apmac, sizeof(apmac), ap_cur->bssid);
 
-	if (log_sta_is_unassociated_ap(ap_cur))
+	if (deauth_is_unassociated_ap(ap_cur))
 	{
-		log_sta_refuse_with_message("selected AP is the unassociated-client entry");
-		return (0);
-	}
-
-	if (log_sta_requires_mfp(ap_cur))
-	{
-		log_sta_refuse_with_message("selected AP requires MFP");
+		deauth_refuse_with_message("selected AP is the unassociated-client entry");
 		return (0);
 	}
 
@@ -1364,7 +1369,7 @@ static int launch_log_sta(void)
 restore_state:
 	snprintf(lopt.message,
 			 sizeof(lopt.message),
-			 "][ log_sta complete");
+			 "][ deauth complete");
 	append_tui_message_history_now(lopt.message);
 	if (!use_ncurses_tui)
 	{
@@ -1624,6 +1629,7 @@ static const char usage[] =
 	"                              pcap, ivs, csv, gps, kismet, netxml, "
 	"logcsv\n"
 	"      -P / --probes         : Log distinct probes to a live text file\n"
+	"      --legacy-ui           : Force the legacy text UI instead of ncurses\n"
 	"      --ignore-negative-one : Removes the message that says\n"
 	"                              fixed channel <interface>: -1\n"
 	"      --write-interval\n"
@@ -4930,17 +4936,18 @@ static void log_distinct_probe_essid(const struct ST_info * st_cur,
 	fflush(opt.f_probes);
 }
 
-static int log_sta_mfp_guard(struct AP_info * ap_cur)
+static int deauth_mfp_guard(struct AP_info * ap_cur)
 {
 	if (ap_cur == NULL) return (0);
 
-	if (ap_cur->mfp_required)
+	if (ap_cur->mfp_required || (ap_cur->security & AUTH_SAE))
 	{
+		ap_cur->mfp_warned = 1;
 		snprintf(lopt.message,
 				 sizeof(lopt.message),
-				 "][ log_sta refused: selected AP requires MFP");
+				 "][ selected AP requires MFP; press d again to continue");
 		append_tui_message_history_now(lopt.message);
-		return (0);
+		return (1);
 	}
 
 	if (ap_cur->mfp_capable && !ap_cur->mfp_warned)
@@ -4948,32 +4955,22 @@ static int log_sta_mfp_guard(struct AP_info * ap_cur)
 		ap_cur->mfp_warned = 1;
 		snprintf(lopt.message,
 				 sizeof(lopt.message),
-				 "][ selected AP advertises optional MFP; log_sta may fail");
+				 "][ selected AP advertises optional MFP; deauth may fail");
 		append_tui_message_history_now(lopt.message);
-		return (0);
+		return (1);
 	}
 
-	return (1);
+	return (0);
 }
 
-static int log_sta_is_unassociated_ap(const struct AP_info * ap_cur)
+static int deauth_is_unassociated_ap(const struct AP_info * ap_cur)
 {
 	return (ap_cur != NULL && memcmp(ap_cur->bssid, BROADCAST, 6) == 0);
 }
 
-static int log_sta_requires_mfp(const struct AP_info * ap_cur)
+static void deauth_refuse_with_message(const char * reason)
 {
-	if (ap_cur == NULL) return (0);
-
-	/* WPA3-SAE requires PMF even if the RSN capability bit was not retained. */
-	if (ap_cur->security & AUTH_SAE) return (1);
-
-	return (ap_cur->mfp_required != 0);
-}
-
-static void log_sta_refuse_with_message(const char * reason)
-{
-	snprintf(lopt.message, sizeof(lopt.message), "][ log_sta refused: %s", reason);
+	snprintf(lopt.message, sizeof(lopt.message), "][ deauth refused: %s", reason);
 	append_tui_message_history_now(lopt.message);
 }
 
@@ -5186,6 +5183,12 @@ static int handle_mouse_event(void)
 					 tui_state.ap_box_height,
 					 tui_state.ap_box_width))
 	{
+		if (event.y >= tui_state.ap_box_top + 3)
+		{
+			set_selected_ap(NULL, selection_direction_no);
+			set_tui_focus(0);
+			return (1);
+		}
 		set_tui_focus(0);
 		return (1);
 	}
@@ -5271,6 +5274,23 @@ static int handle_keycode(int keycode)
 				if (use_ncurses_tui)
 					render_output_view(0);
 			}
+		}
+		goto done;
+	}
+
+	if (use_ncurses_tui && tui_state.help_visible)
+	{
+		tui_state.help_visible = 0;
+		redraw = 1;
+		goto done;
+	}
+
+	if (keycode == '?' || keycode == KEY_F(1))
+	{
+		if (use_ncurses_tui)
+		{
+			tui_state.help_visible = !tui_state.help_visible;
+			redraw = 1;
 		}
 		goto done;
 	}
@@ -5423,40 +5443,37 @@ static int handle_keycode(int keycode)
 
 	if (keycode == KEY_d)
 	{
-		log_sta_event_ts = time(NULL);
+		deauth_event_ts = time(NULL);
 
-		if (lopt.p_selected_ap != NULL
-			&& (log_sta_is_unassociated_ap(lopt.p_selected_ap)
-				|| log_sta_requires_mfp(lopt.p_selected_ap)))
+		if (lopt.p_selected_ap != NULL && deauth_is_unassociated_ap(lopt.p_selected_ap))
 		{
-			log_sta_launching = 0;
-			if (log_sta_is_unassociated_ap(lopt.p_selected_ap))
-				log_sta_refuse_with_message(
-					"don't be silly");
-			else
-				log_sta_refuse_with_message("selected AP requires MFP");
+			deauth_launching = 0;
+			deauth_refuse_with_message("don't be silly");
 			redraw = 1;
 			goto done;
 		}
 
-		if (++log_sta_launching > 1) //-V1051
+		if (++deauth_launching > 1) //-V1051
 		{
-			log_sta_launching = 0;
-			launch_log_sta();
+			deauth_launching = 0;
+			launch_deauth();
 			redraw = 1;
 		}
 		else
 		{
-			if (lopt.p_selected_ap != NULL && lopt.p_selected_ap->mfp_capable
-				&& !lopt.p_selected_ap->mfp_warned)
+			if (lopt.p_selected_ap != NULL
+				&& (lopt.p_selected_ap->mfp_required
+					|| (lopt.p_selected_ap->security & AUTH_SAE)
+					|| (lopt.p_selected_ap->mfp_capable
+						&& !lopt.p_selected_ap->mfp_warned)))
 			{
-				log_sta_mfp_guard(lopt.p_selected_ap);
+				deauth_mfp_guard(lopt.p_selected_ap);
 			}
 			else
 			{
 				snprintf(lopt.message,
 						 sizeof(lopt.message),
-						 "][ Are you sure you want to run log_sta? Press d again to continue.");
+						 "][ Are you sure you want to deauth? Press d again to continue.");
 			}
 			redraw = 1;
 		}
@@ -8917,6 +8934,7 @@ int main(int argc, char * argv[])
 		   {"target", 1, 0, 'z'},
 		   {"tcp-server", 1, 0, 'V'},
 		   {"probes", 0, 0, 'P'},
+		   {"legacy-ui", 0, 0, 'L'},
 		   {"ax40", 0, 0, '4'},
 		   {"ax80", 0, 0, '8'},
 		   {"ax80+", 0, 0, '9'},
@@ -9398,6 +9416,10 @@ int main(int argc, char * argv[])
 
 				opt.record_data = 1;
 				opt.output_format_probes = 1;
+				break;
+
+			case 'L':
+				force_legacy_ui = 1;
 				break;
 
 			case 'i':
@@ -10111,7 +10133,10 @@ int main(int argc, char * argv[])
 		waitpid(-1, NULL, WNOHANG);
 	}
 
-	use_ncurses_tui = airodump_tui_start(&tui_state);
+	if (!force_legacy_ui)
+		use_ncurses_tui = airodump_tui_start(&tui_state);
+	else
+		use_ncurses_tui = 0;
 	(void) atexit(restore_terminal);
 	if (!use_ncurses_tui)
 	{
@@ -10600,10 +10625,10 @@ int main(int argc, char * argv[])
 			snprintf(lopt.message, sizeof(lopt.message), "]");
 		}
 
-		if (log_sta_launching && time(NULL) - log_sta_event_ts > 3)
+		if (deauth_launching && time(NULL) - deauth_event_ts > 3)
 		{
-			log_sta_event_ts = 0;
-			log_sta_launching = 0;
+			deauth_event_ts = 0;
+			deauth_launching = 0;
 			snprintf(lopt.message, sizeof(lopt.message), "]");
 		}
 	}

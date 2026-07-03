@@ -33,6 +33,7 @@ struct airodump_tui_state
 	int resize_pending;
 	int colors_enabled;
 	int mouse_enabled;
+	int help_visible;
 	int sta_sort_by;
 	int sta_sort_inv;
 	int ap_visible_rows;

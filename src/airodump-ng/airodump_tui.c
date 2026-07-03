@@ -42,66 +42,6 @@ static void apply_mouse_mask(struct airodump_tui_state * state)
 	}
 }
 
-static const char * sort_field_label(int sort_by)
-{
-	switch (sort_by)
-	{
-		case SORT_BY_NOTHING:
-			return ("first seen");
-		case SORT_BY_BSSID:
-			return ("bssid");
-		case SORT_BY_POWER:
-			return ("power level");
-		case SORT_BY_BEACON:
-			return ("beacon number");
-		case SORT_BY_DATA:
-			return ("number of data packets");
-		case SORT_BY_PRATE:
-			return ("packet rate");
-		case SORT_BY_CHAN:
-			return ("channel");
-		case SORT_BY_MBIT:
-			return ("max data rate");
-		case SORT_BY_ENC:
-			return ("encryption");
-		case SORT_BY_CIPHER:
-			return ("cipher");
-		case SORT_BY_AUTH:
-			return ("authentication");
-		case SORT_BY_ESSID:
-			return ("ESSID");
-		default:
-			return ("power level");
-	}
-}
-
-static const char * station_sort_field_label(int sort_by)
-{
-	switch (sort_by)
-	{
-		case STA_SORT_BY_NOTHING:
-			return ("none");
-		case STA_SORT_BY_BSSID:
-			return ("BSSID");
-		case STA_SORT_BY_STATION:
-			return ("station MAC");
-		case STA_SORT_BY_POWER:
-			return ("power");
-		case STA_SORT_BY_RATE:
-			return ("rate");
-		case STA_SORT_BY_LOST:
-			return ("lost");
-		case STA_SORT_BY_FRAMES:
-			return ("frames");
-		case STA_SORT_BY_NOTES:
-			return ("notes");
-		case STA_SORT_BY_PROBES:
-			return ("probes");
-		default:
-			return ("first seen");
-	}
-}
-
 static int ap_visible(const struct AP_info * ap, const struct airodump_tui_view * view)
 {
 	REQUIRE(ap != NULL);
@@ -530,7 +470,7 @@ static int render_message_row(int y,
 		int last_space = -1;
 		const char * segment = cursor;
 
-		while (*segment == ' ')
+		while (*segment != '\0' && isspace((unsigned char) *segment))
 			segment++;
 		if (*segment == '\0')
 			break;
@@ -546,6 +486,9 @@ static int render_message_row(int y,
 
 		while (segment[segment_len] != '\0' && segment_len < available)
 		{
+			if (segment[segment_len] == '\n' || segment[segment_len] == '\r'
+				|| segment[segment_len] == '\t')
+				break;
 			if (segment[segment_len] == ' ')
 				last_space = segment_len;
 			segment_len++;
@@ -560,7 +503,7 @@ static int render_message_row(int y,
 		fill_inner_width(y + rows_used, x + prefix_len + segment_len, width - prefix_len - segment_len);
 
 		cursor = segment + segment_len;
-		while (*cursor == ' ')
+		while (*cursor != '\0' && isspace((unsigned char) *cursor))
 			cursor++;
 		rows_used++;
 	}
@@ -951,6 +894,41 @@ static void draw_scrollbar(int top,
 	}
 }
 
+static void render_ascii_box(int top, int left, int height, int width, const char * title)
+{
+	int y;
+	int inner_left;
+	int inner_width;
+	size_t title_len;
+	char title_buf[160];
+
+	if (top < 0 || left < 0 || height < 3 || width < 4) return;
+	if (top + height > LINES) return;
+	if (left + width > COLS) return;
+
+	inner_left = left + 1;
+	inner_width = width - 2;
+	title_len = strlen(title);
+	if (title_len > sizeof(title_buf) - 4) title_len = sizeof(title_buf) - 4;
+	snprintf(title_buf, sizeof(title_buf), " %.*s ", (int) title_len, title);
+
+	mvaddch(top, left, ACS_ULCORNER);
+	mvhline(top, left + 1, ACS_HLINE, width - 2);
+	mvaddch(top, left + width - 1, ACS_URCORNER);
+	mvaddnstr(top, left + 2, title_buf, MIN((int) strlen(title_buf), width - 4));
+
+	for (y = top + 1; y < top + height - 1; y++)
+	{
+		mvaddch(y, left, ACS_VLINE);
+		mvaddch(y, left + width - 1, ACS_VLINE);
+		mvhline(y, inner_left, ' ', inner_width);
+	}
+
+	mvaddch(top + height - 1, left, ACS_LLCORNER);
+	mvhline(top + height - 1, left + 1, ACS_HLINE, width - 2);
+	mvaddch(top + height - 1, left + width - 1, ACS_LRCORNER);
+}
+
 static void render_header_line(const struct airodump_tui_view * view)
 {
 	char line[1024];
@@ -1061,61 +1039,81 @@ static void render_pane_box(int top, int left, int height, int cols, const char 
 static void render_status_line(const struct airodump_tui_state * state,
 							   const struct airodump_tui_view * view)
 {
+	(void) state;
+	(void) view;
 	char line[1024];
+	int width;
 
 	snprintf(line,
 			 sizeof(line),
-			 "F1 help | Tab/Left/Right switch pane | arrows scroll | PgUp/PgDn page | Home/End jump | q quit | Focus: %s",
-			 (state->focus == 1) ? "STA" : (state->focus == 2) ? "MSG" : "AP");
-
-	if (view->selected_ap == NULL)
-		strlcat(line, " stations: all", sizeof(line));
-	else if (memcmp(view->selected_ap->bssid, BROADCAST, 6) == 0)
-		strlcat(line, " stations: unassociated", sizeof(line));
-	else
-		strlcat(line, " stations: selected AP", sizeof(line));
-
-	if (view->show_ap && view->show_sta)
-	{
-		strlcat(line, (state->focus == 0) ? " [AP]" : " AP", sizeof(line));
-		strlcat(line, (state->focus == 1) ? " [STA]" : " STA", sizeof(line));
-	}
-	else if (view->show_ap)
-	{
-		strlcat(line, " [AP only]", sizeof(line));
-	}
-	else if (view->show_sta)
-	{
-		strlcat(line, " [STA only]", sizeof(line));
-	}
-
-	strlcat(line, state->mouse_enabled ? " mouse:on" : " mouse:off", sizeof(line));
-
-	strlcat(line, "  c clear AP filter", sizeof(line));
-	strlcat(line, "  g go to channel", sizeof(line));
-	strlcat(line, "  d run log_sta", sizeof(line));
-	strlcat(line, "  b switch band", sizeof(line));
-	strlcat(line, "  r resume hop", sizeof(line));
-	strlcat(line, "  R realtime sort", sizeof(line));
-	strlcat(line, "  m mark AP", sizeof(line));
-	strlcat(line, "  o colors", sizeof(line));
-	if (state->focus == 1)
-	{
-		strlcat(line, "  STA sort:", sizeof(line));
-		strlcat(line, station_sort_field_label(state->sta_sort_by), sizeof(line));
-	}
-	else
-	{
-		strlcat(line, "  AP sort:", sizeof(line));
-		strlcat(line, sort_field_label(view->sort_by), sizeof(line));
-	}
-
-	if (view->do_pause)
-		strlcat(line, " paused", sizeof(line));
+			 "?:help | Tab/Left/Right:focus | Arrows/PgUp/PgDn/Home/End:scroll | q:quit");
 
 	if (COLS < 1) return;
-	mvaddnstr(LINES - 1, 0, line, MIN(COLS - 1, (int) sizeof(line) - 1));
+	width = MIN(COLS - 1, (int) sizeof(line) - 1);
+	if (width > 0)
+		mvhline(LINES - 1, 0, ACS_HLINE, width);
+	if (width > 4)
+		mvaddnstr(LINES - 1, 2, line, MIN(width - 2, (int) strlen(line)));
 	clrtoeol();
+}
+
+static void render_help_overlay(void)
+{
+	static const char * lines[] = {
+		"?: close help",
+		"Tab / Left / Right: switch pane",
+		"Arrow keys: scroll",
+		"PgUp / PgDn: page scroll",
+		"Home / End: jump to top/bottom",
+		"q: quit",
+		"m: mark selected AP",
+		"o: toggle colors",
+		"b: switch band",
+		"r: resume hopping",
+		"d: log stations / deauth",
+		"s: cycle sort in active pane",
+		"R: toggle realtime sorting",
+		"M: toggle mouse capture",
+		"c: clear AP filter",
+		"g: go to channel",
+	};
+	const int line_count = (int) (sizeof(lines) / sizeof(lines[0]));
+	int max_len = 0;
+	int i;
+	int box_width;
+	int box_height;
+	int visible_count;
+	int left;
+	int top;
+
+	for (i = 0; i < line_count; i++)
+	{
+		int len = (int) strlen(lines[i]);
+		if (len > max_len) max_len = len;
+	}
+
+	box_width = max_len + 4;
+	box_height = line_count + 4;
+	if (box_width > COLS - 4) box_width = COLS - 4;
+	if (box_height > LINES - 4) box_height = LINES - 4;
+	if (box_width < 20 || box_height < 6) return;
+	visible_count = MIN(line_count, box_height - 4);
+
+	left = (COLS - box_width) / 2;
+	top = (LINES - box_height) / 2;
+
+	attron(A_REVERSE);
+	for (i = 0; i < box_height; i++)
+	{
+		int y = top + i;
+		if (y < 0 || y >= LINES) continue;
+		mvhline(y, left, ' ', box_width);
+	}
+	attroff(A_REVERSE);
+
+	render_ascii_box(top, left, box_height, box_width, " Help ");
+	for (i = 0; i < visible_count; i++)
+		mvaddnstr(top + 2 + i, left + 2, lines[i], box_width - 4);
 }
 
 static void ensure_colors(struct airodump_tui_state * state)
@@ -1155,6 +1153,14 @@ int airodump_tui_available(void)
 #endif
 }
 
+static void maybe_adjust_ghostty_term(void)
+{
+	const char * term = getenv("TERM");
+
+	if (term != NULL && strcmp(term, "xterm-ghostty") == 0)
+		setenv("TERM", "xterm-256color", 1);
+}
+
 int airodump_tui_start(struct airodump_tui_state * state)
 {
 	if (state == NULL) return (0);
@@ -1164,6 +1170,8 @@ int airodump_tui_start(struct airodump_tui_state * state)
 	{
 		return (0);
 	}
+
+	maybe_adjust_ghostty_term();
 
 	if (initscr() == NULL)
 	{
@@ -1178,13 +1186,13 @@ int airodump_tui_start(struct airodump_tui_state * state)
 	mouseinterval(0);
 	curs_set(0);
 	ensure_colors(state);
+	state->active = 1;
 	state->mouse_enabled = 1;
 	state->sta_sort_by = SORT_BY_NOTHING;
 	state->sta_sort_inv = 1;
 	apply_mouse_mask(state);
 
 	getmaxyx(stdscr, state->rows, state->cols);
-	state->active = 1;
 	state->focus = 0;
 	state->msg_follow_latest = 1;
 	return (1);
@@ -1563,6 +1571,8 @@ void airodump_tui_render(struct airodump_tui_state * state,
 	}
 
 	render_status_line(state, view);
+	if (state->help_visible)
+		render_help_overlay();
 	wnoutrefresh(stdscr);
 	doupdate();
 
