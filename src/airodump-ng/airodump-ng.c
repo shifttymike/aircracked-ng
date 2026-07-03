@@ -115,6 +115,19 @@ static int read_pkts = 0;
 static int colors_enabled = 0;
 static int force_legacy_ui = 0;
 
+struct probe_log_entry
+{
+	struct probe_log_entry * next;
+	time_t first_seen;
+	time_t last_seen;
+	unsigned long times_seen;
+	uint8_t station_mac[6];
+	size_t essid_len;
+	unsigned char essid[ESSID_LENGTH + 1];
+};
+
+static struct probe_log_entry * probe_log_entries = NULL;
+
 static int abg_chans[]
 	= {1,   7,   13,  2,   8,   3,   14,  9,   4,   10,  5,   11,  6,
 	   12,  36,  38,  40,  42,  44,  46,  48,  50,  52,  54,  56,  58,
@@ -625,10 +638,14 @@ static struct AP_info * pick_ap_from_mouse(int x, int y);
 static void set_selected_ap(struct AP_info * ap,
 							int selection_direction);
 static void cycle_tui_focus(int direction);
-static int probe_seen_globally(const unsigned char * probe, size_t len);
+static char * csv_escape_field(const unsigned char * input, size_t len);
+static void format_probe_timestamp(char * out, size_t out_len, time_t ts);
+static struct probe_log_entry * find_probe_log_entry(const unsigned char * probe,
+													 size_t len);
 static void log_distinct_probe_essid(const struct ST_info * st_cur,
 									 const unsigned char * probe,
 									 size_t len);
+static void free_probe_log_entries(void);
 static int deauth_mfp_guard(struct AP_info * ap_cur);
 static int deauth_is_unassociated_ap(const struct AP_info * ap_cur);
 static void deauth_refuse_with_message(const char * reason);
@@ -1645,7 +1662,7 @@ static const char usage[] =
 	"                  <formats> : Output format. Possible values:\n"
 	"                              pcap, ivs, csv, gps, kismet, netxml, "
 	"logcsv\n"
-	"      -P / --probes         : Log distinct probes to a live text file\n"
+	"      -P / --probes         : Log probe sightings to a live CSV file\n"
 	"      --legacy-ui           : Force the legacy text UI instead of ncurses\n"
 	"      --ignore-negative-one : Removes the message that says\n"
 	"                              fixed channel <interface>: -1\n"
@@ -2587,10 +2604,13 @@ skip_station:
 				&& (p[1] > 1 || p[2] != ' '))
 			{
 				n = MIN(ESSID_LENGTH, p[1]);
-				int is_new_probe;
 
 				for (i = 0; i < n; i++)
 					if (p[2 + i] > 0 && p[2 + i] < ' ') goto skip_probe;
+
+				log_distinct_probe_essid(st_cur,
+										 (const unsigned char *) (p + 2),
+										 (size_t) n);
 
 				/* got a valid ASCII probed ESSID, check if it's
 				   already in the ring buffer */
@@ -2598,8 +2618,6 @@ skip_station:
 				for (i = 0; i < NB_PRB; i++)
 					if (memcmp(st_cur->probes[i], p + 2, n) == 0)
 						goto skip_probe;
-
-				is_new_probe = !probe_seen_globally((const unsigned char *) (p + 2), (size_t) n);
 
 				st_cur->probe_index = (st_cur->probe_index + 1) % NB_PRB;
 				memset(st_cur->probes[st_cur->probe_index], 0, 256);
@@ -2617,12 +2635,6 @@ skip_station:
 						st_cur->probes[st_cur->probe_index][i] = c;
 					}
 
-				if (is_new_probe)
-				{
-					log_distinct_probe_essid(st_cur,
-											 (const unsigned char *) st_cur->probes[st_cur->probe_index],
-											 (size_t) st_cur->ssid_length[st_cur->probe_index]);
-				}
 			}
 
 			p += 2 + p[1];
@@ -4900,56 +4912,131 @@ static int next_station_sort_field(int sort_by)
 	return (sort_by + 1);
 }
 
-static int probe_seen_globally(const unsigned char * probe, size_t len)
+static char * csv_escape_field(const unsigned char * input, size_t len)
 {
-	struct ST_info * st_cur;
-	int i;
+	size_t i;
+	size_t out_len = 3; /* quotes + NUL */
+	char * out;
+	char * cursor;
 
-	if (probe == NULL || len == 0) return (1);
+	if (input == NULL) return (NULL);
 
-	st_cur = lopt.st_1st;
-	while (st_cur != NULL)
+	for (i = 0; i < len; i++)
 	{
-		for (i = 0; i < NB_PRB; i++)
-		{
-			if (st_cur->ssid_length[i] != (int) len) continue;
-			if (memcmp(st_cur->probes[i], probe, len) == 0)
-				return (1);
-		}
-		st_cur = st_cur->next;
+		out_len += 1;
+		if (input[i] == '"') out_len++;
 	}
 
-	return (0);
+	out = (char *) malloc(out_len);
+	ALLEGE(out != NULL);
+
+	cursor = out;
+	*cursor++ = '"';
+	for (i = 0; i < len; i++)
+	{
+		if (input[i] == '"') *cursor++ = '"';
+		*cursor++ = (char) input[i];
+	}
+	*cursor++ = '"';
+	*cursor = '\0';
+
+	return (out);
+}
+
+static struct probe_log_entry * find_probe_log_entry(const unsigned char * probe,
+													 size_t len)
+{
+	struct probe_log_entry * entry = probe_log_entries;
+
+	while (entry != NULL)
+	{
+		if (entry->essid_len == len && memcmp(entry->essid, probe, len) == 0)
+			return (entry);
+		entry = entry->next;
+	}
+
+	return (NULL);
+}
+
+static void format_probe_timestamp(char * out, size_t out_len, time_t ts)
+{
+	struct tm * ltime;
+
+	if (out == NULL || out_len == 0) return;
+
+	ltime = localtime(&ts);
+	if (ltime != NULL
+		&& strftime(out, out_len, "%Y-%m-%d %H:%M:%S", ltime) > 0)
+	{
+		return;
+	}
+
+	snprintf(out, out_len, "%ld", (long) ts);
+}
+
+static void free_probe_log_entries(void)
+{
+	struct probe_log_entry * entry = probe_log_entries;
+
+	while (entry != NULL)
+	{
+		struct probe_log_entry * next = entry->next;
+		free(entry);
+		entry = next;
+	}
+
+	probe_log_entries = NULL;
 }
 
 static void log_distinct_probe_essid(const struct ST_info * st_cur,
 									 const unsigned char * probe,
 									 size_t len)
 {
-	struct tm * ltime;
+	struct probe_log_entry * entry;
+	char first_seen[32];
+	char last_seen[32];
+	char * essid_csv;
+	time_t seen_ts;
 
 	if (st_cur == NULL || probe == NULL || len == 0) return;
 	if (!opt.output_format_probes || opt.f_probes == NULL) return;
 
-	ltime = localtime(&st_cur->tlast);
-	if (ltime == NULL) return;
+	seen_ts = (st_cur->tlast != 0) ? st_cur->tlast : time(NULL);
+	entry = find_probe_log_entry(probe, len);
+	if (entry == NULL)
+	{
+		entry = (struct probe_log_entry *) calloc(1, sizeof(*entry));
+		ALLEGE(entry != NULL);
+		entry->next = probe_log_entries;
+		probe_log_entries = entry;
+		entry->first_seen = seen_ts;
+		entry->essid_len = len;
+		memcpy(entry->essid, probe, len);
+		entry->essid[len] = '\0';
+	}
+
+	entry->last_seen = seen_ts;
+	entry->times_seen++;
+	memcpy(entry->station_mac, st_cur->stmac, sizeof(entry->station_mac));
+
+	format_probe_timestamp(first_seen, sizeof(first_seen), entry->first_seen);
+	format_probe_timestamp(last_seen, sizeof(last_seen), entry->last_seen);
+	essid_csv = csv_escape_field(entry->essid, entry->essid_len);
+	if (essid_csv == NULL) return;
 
 	fprintf(opt.f_probes,
-			"%04d-%02d-%02d %02d:%02d:%02d\t%02X:%02X:%02X:%02X:%02X:%02X\t%.*s\r\n",
-			1900 + ltime->tm_year,
-			1 + ltime->tm_mon,
-			ltime->tm_mday,
-			ltime->tm_hour,
-			ltime->tm_min,
-			ltime->tm_sec,
-			st_cur->stmac[0],
-			st_cur->stmac[1],
-			st_cur->stmac[2],
-			st_cur->stmac[3],
-			st_cur->stmac[4],
-			st_cur->stmac[5],
-			(int) len,
-			(const char *) probe);
+			"%s,%s,%02X:%02X:%02X:%02X:%02X:%02X,%lu,%s\r\n",
+			first_seen,
+			last_seen,
+			entry->station_mac[0],
+			entry->station_mac[1],
+			entry->station_mac[2],
+			entry->station_mac[3],
+			entry->station_mac[4],
+			entry->station_mac[5],
+			entry->times_seen,
+			essid_csv);
+	free(essid_csv);
 	fflush(opt.f_probes);
 }
 
@@ -10653,6 +10740,7 @@ int main(int argc, char * argv[])
 		if (opt.f_ivs != NULL) fclose(opt.f_ivs);
 		if (opt.f_logcsv != NULL) fclose(opt.f_logcsv);
 		if (opt.f_probes != NULL) fclose(opt.f_probes);
+		free_probe_log_entries();
 	}
 
 	if (!lopt.save_gps)

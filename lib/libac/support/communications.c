@@ -948,7 +948,7 @@ int capture_ask_packet(int * caplen, int just_grab)
 #define AIRODUMP_NG_GPS_EXT "gps"
 #define AIRODUMP_NG_CAP_EXT "cap"
 #define AIRODUMP_NG_LOG_CSV_EXT "log.csv"
-#define AIRODUMP_NG_PROBES_EXT "probes.txt"
+#define AIRODUMP_NG_PROBES_EXT "probes.csv"
 
 static const char * f_ext[] = {AIRODUMP_NG_CSV_EXT,
 							   AIRODUMP_NG_GPS_EXT,
@@ -1053,7 +1053,7 @@ int dump_initialize_multi_format(char * prefix, int ivs_only, int ppi, int *tcp_
 				"Longitude Error, Type\r\n");
 	}
 
-	/* create the output distinct probes text file */
+	/* create the output probe CSV file */
 	if (opt.output_format_probes)
 	{
 		memset(ofn, 0, ofn_len);
@@ -1074,7 +1074,8 @@ int dump_initialize_multi_format(char * prefix, int ivs_only, int ppi, int *tcp_
 		}
 
 		setvbuf(opt.f_probes, NULL, _IOLBF, 0);
-		fprintf(opt.f_probes, "# First seen\tStation MAC\tProbe ESSID\r\n");
+		fprintf(opt.f_probes,
+				"First seen,Last seen,Station MAC,Times seen,Probe ESSID\r\n");
 	}
 
 	/* create the output Kismet CSV file */
