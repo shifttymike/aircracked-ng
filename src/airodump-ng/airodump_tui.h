@@ -20,6 +20,13 @@
 #define STA_SORT_BY_PROBES 8
 #define STA_SORT_MAX 8
 
+enum airodump_tui_message_style
+{
+	AIRODUMP_TUI_MESSAGE_STYLE_DEFAULT = 0,
+	AIRODUMP_TUI_MESSAGE_STYLE_WARNING = 1,
+	AIRODUMP_TUI_MESSAGE_STYLE_SUCCESS = 2
+};
+
 struct airodump_tui_state
 {
 	int active;
@@ -56,6 +63,7 @@ struct airodump_tui_state
 struct airodump_tui_message_entry
 {
 	time_t timestamp;
+	enum airodump_tui_message_style style;
 	char text[512];
 };
 

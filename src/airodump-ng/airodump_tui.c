@@ -428,10 +428,49 @@ static void render_station_header_row(int y, int x, int width)
 	attroff(A_BOLD);
 }
 
+static void render_message_style_begin(const struct airodump_tui_state * state,
+									   enum airodump_tui_message_style style)
+{
+	if (state == NULL || !state->colors_enabled) return;
+
+	switch (style)
+	{
+		case AIRODUMP_TUI_MESSAGE_STYLE_WARNING:
+			attron(COLOR_PAIR(3));
+			attron(A_BOLD);
+			break;
+		case AIRODUMP_TUI_MESSAGE_STYLE_SUCCESS:
+			attron(COLOR_PAIR(2));
+			break;
+		default:
+			break;
+	}
+}
+
+static void render_message_style_end(const struct airodump_tui_state * state,
+									 enum airodump_tui_message_style style)
+{
+	if (state == NULL || !state->colors_enabled) return;
+
+	switch (style)
+	{
+		case AIRODUMP_TUI_MESSAGE_STYLE_WARNING:
+			attroff(A_BOLD);
+			attroff(COLOR_PAIR(3));
+			break;
+		case AIRODUMP_TUI_MESSAGE_STYLE_SUCCESS:
+			attroff(COLOR_PAIR(2));
+			break;
+		default:
+			break;
+	}
+}
+
 static int render_message_row(int y,
 							  int x,
 							  int width,
 							  int max_rows,
+							  const struct airodump_tui_state * state,
 							  const struct airodump_tui_message_entry * entry)
 {
 	char ts[32];
@@ -442,6 +481,8 @@ static int render_message_row(int y,
 
 	if (width < 1) width = 1;
 	if (max_rows < 1) return (0);
+
+	render_message_style_begin(state, entry->style);
 
 	lt = localtime(&(entry->timestamp));
 	if (lt != NULL)
@@ -459,6 +500,7 @@ static int render_message_row(int y,
 	{
 		mvaddnstr(y, x, ts, width);
 		fill_inner_width(y, x + width, 0);
+		render_message_style_end(state, entry->style);
 		return (1);
 	}
 
@@ -515,6 +557,7 @@ static int render_message_row(int y,
 		rows_used = 1;
 	}
 
+	render_message_style_end(state, entry->style);
 	return (rows_used);
 }
 
@@ -1051,9 +1094,7 @@ static void render_status_line(const struct airodump_tui_state * state,
 	if (COLS < 1) return;
 	width = MIN(COLS - 1, (int) sizeof(line) - 1);
 	if (width > 0)
-		mvhline(LINES - 1, 0, ACS_HLINE, width);
-	if (width > 4)
-		mvaddnstr(LINES - 1, 2, line, MIN(width - 2, (int) strlen(line)));
+		mvaddnstr(LINES - 1, 0, line, MIN(width, (int) strlen(line)));
 	clrtoeol();
 }
 
@@ -1066,7 +1107,6 @@ static void render_help_overlay(void)
 		"PgUp / PgDn: page scroll",
 		"Home / End: jump to top/bottom",
 		"q: quit",
-		"m: mark selected AP",
 		"o: toggle colors",
 		"b: switch band",
 		"r: resume hopping",
@@ -1476,6 +1516,7 @@ void airodump_tui_render(struct airodump_tui_state * state,
 													   msg_box_left + 1,
 													   msg_box_width - 2,
 													   rows_left,
+													   state,
 													   &(view->messages[msg_start + i]));
 						if (used_rows <= 0)
 							break;

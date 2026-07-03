@@ -745,7 +745,6 @@ static struct local_options
 		selection_direction_up,
 		selection_direction_no
 	} en_selection_direction;
-	int mark_cur_ap;
 	int num_cards;
 	int do_pause;
 	int do_sort_always;
@@ -815,6 +814,25 @@ static int normalize_tui_message(const char * message, char * out, size_t out_le
 		used--;
 	out[used] = '\0';
 	return (used > 0);
+}
+
+static enum airodump_tui_message_style message_style_from_text(const char * message)
+{
+	if (message == NULL) return (AIRODUMP_TUI_MESSAGE_STYLE_DEFAULT);
+
+	if (strstr(message, "Selected AP requires MFP") != NULL
+		|| strstr(message, "Selected AP advertises optional MFP") != NULL)
+	{
+		return (AIRODUMP_TUI_MESSAGE_STYLE_WARNING);
+	}
+
+	if (strstr(message, "PMKID found:") != NULL
+		|| strstr(message, "WPA handshake:") != NULL)
+	{
+		return (AIRODUMP_TUI_MESSAGE_STYLE_SUCCESS);
+	}
+
+	return (AIRODUMP_TUI_MESSAGE_STYLE_DEFAULT);
 }
 
 /* targeting globals*/
@@ -1028,7 +1046,6 @@ static void resetSelection(void)
 	lopt.start_print_sta = 1;
 	lopt.p_selected_ap = NULL;
 	lopt.en_selection_direction = selection_direction_no;
-	lopt.mark_cur_ap = 0;
 	lopt.do_pause = 0;
 	lopt.do_sort_always = 0;
 	memset(lopt.selected_bssid, '\x00', 6);
@@ -1077,7 +1094,7 @@ static int launch_deauth(void)
 
 	if (deauth_is_unassociated_ap(ap_cur))
 	{
-		deauth_refuse_with_message("selected AP is the unassociated-client entry");
+		deauth_refuse_with_message("Selected AP is the unassociated-client entry");
 		return (0);
 	}
 
@@ -1190,7 +1207,7 @@ static int launch_deauth(void)
 	{
 		snprintf(lopt.message,
 				 sizeof(lopt.message),
-				 "][ no stations for selected AP");
+				 "][ No stations for selected AP");
 		append_tui_message_history_now(lopt.message);
 		goto restore_state;
 	}
@@ -3691,16 +3708,16 @@ skip_probe:
 							memcpy(st_cur->wpa.stmac, st_cur->stmac, 6);
 							memcpy(lopt.wpa_bssid, ap_cur->bssid, 6);
 							memset(lopt.message, '\x00', sizeof(lopt.message));
-						 snprintf(lopt.message,
-									 sizeof(lopt.message) - 1,
-									 "][ PMKID found: "
-									 "%02X:%02X:%02X:%02X:%02X:%02X ",
-									 lopt.wpa_bssid[0],
-									 lopt.wpa_bssid[1],
-									 lopt.wpa_bssid[2],
-									 lopt.wpa_bssid[3],
-									 lopt.wpa_bssid[4],
-									 lopt.wpa_bssid[5]);
+							snprintf(lopt.message,
+									sizeof(lopt.message) - 1,
+									"][ PMKID found: "
+									"%02X:%02X:%02X:%02X:%02X:%02X ",
+									lopt.wpa_bssid[0],
+									lopt.wpa_bssid[1],
+									lopt.wpa_bssid[2],
+									lopt.wpa_bssid[3],
+									lopt.wpa_bssid[4],
+									lopt.wpa_bssid[5]);
 							append_tui_message_history_now(lopt.message);
 
 							goto write_packet;
@@ -4645,6 +4662,7 @@ static void append_tui_message_history(const char * message, time_t timestamp)
 	}
 
 	tui_message_history[tui_message_history_count].timestamp = timestamp;
+	tui_message_history[tui_message_history_count].style = message_style_from_text(message);
 	strlcpy(tui_message_history[tui_message_history_count].text,
 			message,
 			sizeof(tui_message_history[tui_message_history_count].text));
@@ -4945,7 +4963,7 @@ static int deauth_mfp_guard(struct AP_info * ap_cur)
 		ap_cur->mfp_warned = 1;
 		snprintf(lopt.message,
 				 sizeof(lopt.message),
-				 "][ selected AP requires MFP; press d again to continue");
+				 "][ Selected AP requires MFP; press d again to continue");
 		append_tui_message_history_now(lopt.message);
 		return (1);
 	}
@@ -4955,7 +4973,7 @@ static int deauth_mfp_guard(struct AP_info * ap_cur)
 		ap_cur->mfp_warned = 1;
 		snprintf(lopt.message,
 				 sizeof(lopt.message),
-				 "][ selected AP advertises optional MFP; deauth may fail");
+				 "][ Selected AP advertises optional MFP; deauth may fail");
 		append_tui_message_history_now(lopt.message);
 		return (1);
 	}
@@ -4970,7 +4988,7 @@ static int deauth_is_unassociated_ap(const struct AP_info * ap_cur)
 
 static void deauth_refuse_with_message(const char * reason)
 {
-	snprintf(lopt.message, sizeof(lopt.message), "][ deauth refused: %s", reason);
+	snprintf(lopt.message, sizeof(lopt.message), "][ Deauth refused: %s", reason);
 	append_tui_message_history_now(lopt.message);
 }
 
@@ -5412,35 +5430,6 @@ static int handle_keycode(int keycode)
 		redraw = 1;
 	}
 
-	if (keycode == KEY_m)
-	{
-		if (lopt.p_selected_ap != NULL)
-		{
-			if (lopt.p_selected_ap->marked == 0)
-			{
-				lopt.p_selected_ap->marked = 1;
-				if (lopt.p_selected_ap->marked_color < 1
-					|| lopt.p_selected_ap->marked_color > TEXT_MAX_COLOR)
-					lopt.p_selected_ap->marked_color = 1;
-			}
-			else
-			{
-				lopt.p_selected_ap->marked = 0;
-			}
-			snprintf(lopt.message,
-					 sizeof(lopt.message),
-					 "][ %s AP %02X:%02X:%02X:%02X:%02X:%02X",
-					 lopt.p_selected_ap->marked ? "marked" : "unmarked",
-					 lopt.p_selected_ap->bssid[0],
-					 lopt.p_selected_ap->bssid[1],
-					 lopt.p_selected_ap->bssid[2],
-					 lopt.p_selected_ap->bssid[3],
-					 lopt.p_selected_ap->bssid[4],
-					 lopt.p_selected_ap->bssid[5]);
-			redraw = 1;
-		}
-	}
-
 	if (keycode == KEY_d)
 	{
 		deauth_event_ts = time(NULL);
@@ -5448,7 +5437,7 @@ static int handle_keycode(int keycode)
 		if (lopt.p_selected_ap != NULL && deauth_is_unassociated_ap(lopt.p_selected_ap))
 		{
 			deauth_launching = 0;
-			deauth_refuse_with_message("don't be silly");
+			deauth_refuse_with_message("Don't be silly");
 			redraw = 1;
 			goto done;
 		}
@@ -6301,23 +6290,6 @@ static void dump_print(int ws_row, int ws_col, int if_num)
 
 			if (lopt.p_selected_ap && (lopt.p_selected_ap == ap_cur))
 			{
-				if (lopt.mark_cur_ap)
-				{
-					if (ap_cur->marked == 0)
-					{
-						ap_cur->marked = 1;
-					}
-					else
-					{
-						ap_cur->marked_color++;
-						if (ap_cur->marked_color > TEXT_MAX_COLOR)
-						{
-							ap_cur->marked_color = 1;
-							ap_cur->marked = 0;
-						}
-					}
-					lopt.mark_cur_ap = 0;
-				}
 				textstyle(TEXT_REVERSE);
 				memcpy(lopt.selected_bssid, ap_cur->bssid, 6);
 			}
