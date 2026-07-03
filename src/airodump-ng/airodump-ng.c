@@ -4974,6 +4974,54 @@ static void format_probe_timestamp(char * out, size_t out_len, time_t ts)
 	snprintf(out, out_len, "%ld", (long) ts);
 }
 
+static void rewrite_probe_log_csv(void)
+{
+	const struct probe_log_entry * entry;
+	char first_seen[32];
+	char last_seen[32];
+	char * essid_csv;
+
+	if (!opt.output_format_probes || opt.f_probes == NULL) return;
+
+	fflush(opt.f_probes);
+	rewind(opt.f_probes);
+	if (ftruncate(fileno(opt.f_probes), 0) != 0)
+	{
+		perror("ftruncate failed");
+		return;
+	}
+
+	fprintf(opt.f_probes,
+			"First seen,Last seen,Station MAC,Times seen,Probe ESSID\r\n");
+
+	entry = probe_log_entries;
+	while (entry != NULL)
+	{
+		format_probe_timestamp(first_seen, sizeof(first_seen), entry->first_seen);
+		format_probe_timestamp(last_seen, sizeof(last_seen), entry->last_seen);
+		essid_csv = csv_escape_field(entry->essid, entry->essid_len);
+		if (essid_csv != NULL)
+		{
+			fprintf(opt.f_probes,
+					"%s,%s,%02X:%02X:%02X:%02X:%02X:%02X,%lu,%s\r\n",
+					first_seen,
+					last_seen,
+					entry->station_mac[0],
+					entry->station_mac[1],
+					entry->station_mac[2],
+					entry->station_mac[3],
+					entry->station_mac[4],
+					entry->station_mac[5],
+					entry->times_seen,
+					essid_csv);
+			free(essid_csv);
+		}
+		entry = entry->next;
+	}
+
+	fflush(opt.f_probes);
+}
+
 static void free_probe_log_entries(void)
 {
 	struct probe_log_entry * entry = probe_log_entries;
@@ -4993,9 +5041,6 @@ static void log_distinct_probe_essid(const struct ST_info * st_cur,
 									 size_t len)
 {
 	struct probe_log_entry * entry;
-	char first_seen[32];
-	char last_seen[32];
-	char * essid_csv;
 	time_t seen_ts;
 
 	if (st_cur == NULL || probe == NULL || len == 0) return;
@@ -5018,26 +5063,7 @@ static void log_distinct_probe_essid(const struct ST_info * st_cur,
 	entry->last_seen = seen_ts;
 	entry->times_seen++;
 	memcpy(entry->station_mac, st_cur->stmac, sizeof(entry->station_mac));
-
-	format_probe_timestamp(first_seen, sizeof(first_seen), entry->first_seen);
-	format_probe_timestamp(last_seen, sizeof(last_seen), entry->last_seen);
-	essid_csv = csv_escape_field(entry->essid, entry->essid_len);
-	if (essid_csv == NULL) return;
-
-	fprintf(opt.f_probes,
-			"%s,%s,%02X:%02X:%02X:%02X:%02X:%02X,%lu,%s\r\n",
-			first_seen,
-			last_seen,
-			entry->station_mac[0],
-			entry->station_mac[1],
-			entry->station_mac[2],
-			entry->station_mac[3],
-			entry->station_mac[4],
-			entry->station_mac[5],
-			entry->times_seen,
-			essid_csv);
-	free(essid_csv);
-	fflush(opt.f_probes);
+	rewrite_probe_log_csv();
 }
 
 static int deauth_mfp_guard(struct AP_info * ap_cur)
