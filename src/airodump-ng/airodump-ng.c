@@ -112,6 +112,7 @@ static const char * OUI_PATHS[]
 	   NULL};
 
 static int read_pkts = 0;
+static int colors_enabled = 0;
 
 static int abg_chans[]
 	= {1,   7,   13,  2,   8,   3,   14,  9,   4,   10,  5,   11,  6,
@@ -568,6 +569,10 @@ static volatile time_t log_sta_event_ts = 0;
 static volatile pid_t hopper_pid = -1;
 static int hopper_pipe_ready = 0;
 static pid_t main_pid = -1;
+static int channel_entry_active = 0;
+static char channel_entry_buf[8];
+static char channel_entry_prompt[128];
+static size_t channel_entry_len = 0;
 static struct wif ** g_wi = NULL;
 static int use_ncurses_tui = 0;
 static volatile sig_atomic_t tui_resize_pending = 0;
@@ -593,6 +598,12 @@ static void channel_hopper(struct wif * wi[], int if_num, int chan_count, pid_t 
 static void frequency_hopper(struct wif * wi[], int if_num, int chan_count, pid_t parent);
 static int channel_to_frequency(int channel);
 static int frequency_to_channel(int frequency);
+static int channel_is_valid_for_band(int channel);
+static int park_on_channel(int channel);
+static void begin_channel_entry(void);
+static void cancel_channel_entry(const char * message);
+static int apply_channel_entry(void);
+static int infer_band_mode(void);
 static void stop_hopper(void);
 static int switch_band(void);
 static const char * band_mode_label(int band_mode);
@@ -603,9 +614,15 @@ static void restore_terminal(void);
 static void record_tui_message_history(void);
 static void append_tui_message_history(const char * message, time_t timestamp);
 static void append_tui_message_history_now(const char * message);
+static int normalize_tui_message(const char * message, char * out, size_t out_len);
+static void set_channel_entry_prompt(void);
 static void set_message_follow_latest(int follow_latest);
 static int tui_message_pane_visible(void);
 static void set_tui_focus(int focus);
+static int handle_mouse_event(void);
+static struct AP_info * pick_ap_from_mouse(int x, int y);
+static void set_selected_ap(struct AP_info * ap,
+							int selection_direction);
 static void cycle_tui_focus(int direction);
 
 /* bunch of global stuff */
@@ -758,6 +775,28 @@ static struct local_options
 
 
 } lopt;
+
+static int normalize_tui_message(const char * message, char * out, size_t out_len)
+{
+	size_t used = 0;
+
+	if (message == NULL || out == NULL || out_len == 0) return (0);
+
+	while (*message != '\0'
+		   && (*message == ']' || *message == '[' || isspace((unsigned char) *message)))
+	{
+		message++;
+	}
+	while (message[used] != '\0' && used + 1 < out_len)
+	{
+		out[used] = message[used];
+		used++;
+	}
+	while (used > 0 && isspace((unsigned char) out[used - 1]))
+		used--;
+	out[used] = '\0';
+	return (used > 0);
+}
 
 /* targeting globals*/
 #define MAX_TARGETS 100
@@ -1010,6 +1049,7 @@ static int launch_log_sta(void)
 		snprintf(lopt.message,
 				 sizeof(lopt.message),
 				 "][ no AP selected");
+		append_tui_message_history_now(lopt.message);
 		return (0);
 	}
 
@@ -1021,7 +1061,7 @@ static int launch_log_sta(void)
 		snprintf(lopt.message,
 				 sizeof(lopt.message),
 				 "][ no wireless interface available");
-		append_tui_message_history(lopt.message, time(NULL));
+		append_tui_message_history_now(lopt.message);
 		return (0);
 	}
 
@@ -1031,6 +1071,7 @@ static int launch_log_sta(void)
 		snprintf(lopt.message,
 				 sizeof(lopt.message),
 				 "][ unable to resolve wireless interface name");
+		append_tui_message_history_now(lopt.message);
 		return (0);
 	}
 
@@ -1056,6 +1097,7 @@ static int launch_log_sta(void)
 			snprintf(lopt.message,
 					 sizeof(lopt.message),
 					 "][ unable to map AP channel to frequency");
+			append_tui_message_history_now(lopt.message);
 			goto restore_state;
 		}
 	}
@@ -1084,6 +1126,7 @@ static int launch_log_sta(void)
 						 sizeof(lopt.message),
 						 "][ failed to tune %s to AP frequency",
 						 wi_get_ifname(wi[i]));
+				append_tui_message_history_now(lopt.message);
 				goto restore_state;
 			}
 			lopt.frequency[i] = new_frequency;
@@ -1101,6 +1144,7 @@ static int launch_log_sta(void)
 						 sizeof(lopt.message),
 						 "][ failed to tune %s to AP channel",
 						 wi_get_ifname(wi[i]));
+				append_tui_message_history_now(lopt.message);
 				goto restore_state;
 			}
 			lopt.channel[i] = new_channel;
@@ -1122,6 +1166,7 @@ static int launch_log_sta(void)
 		snprintf(lopt.message,
 				 sizeof(lopt.message),
 				 "][ no stations for selected AP");
+		append_tui_message_history_now(lopt.message);
 		goto restore_state;
 	}
 
@@ -1130,10 +1175,8 @@ static int launch_log_sta(void)
 			 "][ running aireplay-ng for %d station%s",
 			 station_count,
 			 (station_count == 1) ? "" : "s");
-	append_tui_message_history(lopt.message, time(NULL));
-	if (use_ncurses_tui)
-		render_output_view(0);
-	else
+	append_tui_message_history_now(lopt.message);
+	if (!use_ncurses_tui)
 	{
 		printf("%s\n", lopt.message);
 		fflush(stdout);
@@ -1153,10 +1196,8 @@ static int launch_log_sta(void)
 					 sizeof(lopt.message),
 					 "][ aireplay-ng %s",
 					 stmac);
-			append_tui_message_history(lopt.message, time(NULL));
-			if (use_ncurses_tui)
-				render_output_view(0);
-			else
+			append_tui_message_history_now(lopt.message);
+			if (!use_ncurses_tui)
 			{
 				printf("%s\n", lopt.message);
 				fflush(stdout);
@@ -1168,6 +1209,7 @@ static int launch_log_sta(void)
 				snprintf(lopt.message,
 						 sizeof(lopt.message),
 						 "][ failed to capture aireplay-ng output");
+				append_tui_message_history_now(lopt.message);
 				goto restore_state;
 			}
 
@@ -1180,6 +1222,7 @@ static int launch_log_sta(void)
 				snprintf(lopt.message,
 						 sizeof(lopt.message),
 						 "][ failed to launch aireplay-ng");
+				append_tui_message_history_now(lopt.message);
 				goto restore_state;
 			}
 
@@ -1242,8 +1285,7 @@ static int launch_log_sta(void)
 								line_buf[line_len] = '\0';
 								if (use_ncurses_tui)
 								{
-									append_tui_message_history(line_buf, time(NULL));
-									render_output_view(0);
+									append_tui_message_history_now(line_buf);
 								}
 								else
 								{
@@ -1260,8 +1302,7 @@ static int launch_log_sta(void)
 							line_buf[line_len] = '\0';
 							if (use_ncurses_tui)
 							{
-								append_tui_message_history(line_buf, time(NULL));
-								render_output_view(0);
+								append_tui_message_history_now(line_buf);
 							}
 							else
 							{
@@ -1280,8 +1321,7 @@ static int launch_log_sta(void)
 					line_buf[line_len] = '\0';
 					if (use_ncurses_tui)
 					{
-						append_tui_message_history(line_buf, time(NULL));
-						render_output_view(0);
+						append_tui_message_history_now(line_buf);
 					}
 					else
 					{
@@ -1305,9 +1345,8 @@ restore_state:
 	snprintf(lopt.message,
 			 sizeof(lopt.message),
 			 "][ log_sta complete");
-	if (use_ncurses_tui)
-		render_output();
-	else
+	append_tui_message_history_now(lopt.message);
+	if (!use_ncurses_tui)
 	{
 		printf("%s\n", lopt.message);
 		fflush(stdout);
@@ -1323,6 +1362,7 @@ static void color_off(void)
 {
 	struct AP_info * ap_cur;
 
+	colors_enabled = 0;
 	ap_cur = lopt.ap_1st;
 	while (ap_cur != NULL)
 	{
@@ -1342,6 +1382,7 @@ static void color_on(void)
 	int color = 2;
 
 	color_off();
+	colors_enabled = 1;
 
 	ap_cur = lopt.ap_end;
 
@@ -4521,28 +4562,11 @@ static struct AP_info * find_tui_visible_ap_relative(struct AP_info * current, i
 
 static void record_tui_message_history(void)
 {
-	const char * message = lopt.message;
 	char normalized[sizeof(tui_message_history_last)];
-	size_t used = 0;
 
-	if (message == NULL) return;
-	while (*message != '\0'
-		   && (*message == ']' || *message == '[' || isspace((unsigned char) *message)))
-	{
-		message++;
-	}
-	if (*message == '\0') return;
-
-	while (message[used] != '\0' && used + 1 < sizeof(normalized))
-	{
-		normalized[used] = message[used];
-		used++;
-	}
-	while (used > 0 && isspace((unsigned char) normalized[used - 1]))
-		used--;
-	normalized[used] = '\0';
-
-	if (normalized[0] == '\0') return;
+	if (channel_entry_active) return;
+	if (!normalize_tui_message(lopt.message, normalized, sizeof(normalized)))
+		return;
 	if (strstr(normalized, "Are you sure you want to quit? Press Q again to quit.") != NULL)
 		return;
 	if (strcmp(normalized, tui_message_history_last) == 0) return;
@@ -4572,9 +4596,28 @@ static void append_tui_message_history(const char * message, time_t timestamp)
 
 static void append_tui_message_history_now(const char * message)
 {
-	append_tui_message_history(message, time(NULL));
+	char normalized[sizeof(tui_message_history_last)];
+
+	if (!normalize_tui_message(message, normalized, sizeof(normalized)))
+		return;
+
+	append_tui_message_history(normalized, time(NULL));
+	strlcpy(tui_message_history_last, normalized, sizeof(tui_message_history_last));
 	if (use_ncurses_tui)
+	{
+		if (!(tui_state.focus == 2 && !tui_state.msg_follow_latest))
+			set_message_follow_latest(1);
 		render_output_view(0);
+	}
+}
+
+static void set_channel_entry_prompt(void)
+{
+	snprintf(channel_entry_prompt,
+			 sizeof(channel_entry_prompt),
+			 "select channel for %s: %s_",
+			 band_mode_label(lopt.band_mode),
+			 channel_entry_buf);
 }
 
 static void render_output(void)
@@ -4610,7 +4653,7 @@ static void render_output_view(int record_message_history)
 		view.num_cards = lopt.num_cards;
 		memcpy(view.channel, lopt.channel, sizeof(view.channel));
 		memcpy(view.frequency, lopt.frequency, sizeof(view.frequency));
-		view.message = lopt.message;
+		view.message = channel_entry_active ? channel_entry_prompt : lopt.message;
 		view.batt = lopt.batt;
 		view.elapsed_time = lopt.elapsed_time;
 		view.do_pause = lopt.do_pause;
@@ -4705,9 +4748,346 @@ static void set_tui_focus(int focus)
 #endif
 }
 
+static void set_selected_ap(struct AP_info * ap, int selection_direction)
+{
+	lopt.p_selected_ap = ap;
+	lopt.en_selection_direction = selection_direction;
+	if (ap != NULL)
+		memcpy(lopt.selected_bssid, ap->bssid, 6);
+	else
+		memset(lopt.selected_bssid, '\x00', 6);
+}
+
+static const char * sort_field_name(int sort_by)
+{
+	switch (sort_by)
+	{
+		case SORT_BY_NOTHING:
+			return ("first seen");
+		case SORT_BY_BSSID:
+			return ("bssid");
+		case SORT_BY_POWER:
+			return ("power level");
+		case SORT_BY_BEACON:
+			return ("beacon number");
+		case SORT_BY_DATA:
+			return ("number of data packets");
+		case SORT_BY_PRATE:
+			return ("packet rate");
+		case SORT_BY_CHAN:
+			return ("channel");
+		case SORT_BY_MBIT:
+			return ("max data rate");
+		case SORT_BY_ENC:
+			return ("encryption");
+		case SORT_BY_CIPHER:
+			return ("cipher");
+		case SORT_BY_AUTH:
+			return ("authentication");
+		case SORT_BY_ESSID:
+			return ("ESSID");
+		default:
+			return ("power level");
+	}
+}
+
+static int point_in_box(int x, int y, int top, int left, int height, int width)
+{
+	return (height > 0 && width > 0 && y >= top && y < top + height
+			&& x >= left && x < left + width);
+}
+
+static int mouse_target_focus(int x, int y)
+{
+	if (point_in_box(x,
+					 y,
+					 tui_state.msg_box_top,
+					 tui_state.msg_box_left,
+					 tui_state.msg_box_height,
+					 tui_state.msg_box_width))
+	{
+		return (2);
+	}
+	if (point_in_box(x,
+					 y,
+					 tui_state.sta_box_top,
+					 tui_state.sta_box_left,
+					 tui_state.sta_box_height,
+					 tui_state.sta_box_width))
+	{
+		return (1);
+	}
+	if (point_in_box(x,
+					 y,
+					 tui_state.ap_box_top,
+					 tui_state.ap_box_left,
+					 tui_state.ap_box_height,
+					 tui_state.ap_box_width))
+	{
+		return (0);
+	}
+	return (tui_state.focus);
+}
+
+static struct AP_info * pick_ap_from_mouse(int x, int y)
+{
+	struct AP_info * ap_cur;
+	struct AP_info * ap_rows[4096];
+	size_t ap_count = 0;
+	size_t ap_scroll = 0;
+	size_t selected_index = 0;
+	size_t i;
+	size_t row_index;
+	size_t visible_rows;
+
+	if (!use_ncurses_tui || !lopt.show_ap || tui_state.ap_box_width < 1
+		|| tui_state.ap_box_height < 1)
+	{
+		return (NULL);
+	}
+
+	if (!point_in_box(x,
+					 y,
+					 tui_state.ap_box_top,
+					 tui_state.ap_box_left,
+					 tui_state.ap_box_height,
+					 tui_state.ap_box_width))
+	{
+		return (NULL);
+	}
+
+	if (x < tui_state.ap_box_left + 1 || x >= tui_state.ap_box_left + tui_state.ap_box_width - 1)
+		return (NULL);
+	if (y < tui_state.ap_box_top + 3)
+		return (NULL);
+
+	visible_rows = (size_t) tui_state.ap_visible_rows;
+	if (visible_rows == 0) return (NULL);
+
+	ap_cur = lopt.ap_end;
+	while (ap_cur != NULL)
+	{
+		if (!IsAp2BeSkipped(ap_cur))
+		{
+			if (ap_count < sizeof(ap_rows) / sizeof(ap_rows[0]))
+				ap_rows[ap_count++] = ap_cur;
+		}
+		ap_cur = ap_cur->prev;
+	}
+
+	if (has_unassociated_clients())
+	{
+		ap_cur = find_unassociated_ap();
+		if (ap_cur != NULL && ap_count < sizeof(ap_rows) / sizeof(ap_rows[0]))
+			ap_rows[ap_count++] = ap_cur;
+	}
+
+	if (ap_count == 0) return (NULL);
+
+	if (lopt.p_selected_ap != NULL)
+	{
+		for (i = 0; i < ap_count; i++)
+		{
+			if (ap_rows[i] == lopt.p_selected_ap)
+			{
+				selected_index = i;
+				break;
+			}
+		}
+	}
+
+	ap_scroll = (size_t) tui_state.ap_scroll;
+	if (ap_scroll > ap_count - 1)
+		ap_scroll = ap_count - 1;
+	if (lopt.p_selected_ap != NULL)
+	{
+		if (ap_scroll > selected_index)
+			ap_scroll = selected_index;
+		if (selected_index >= ap_scroll + visible_rows)
+			ap_scroll = selected_index - visible_rows + 1;
+	}
+	if (ap_scroll > ap_count - visible_rows)
+		ap_scroll = (ap_count > visible_rows) ? ap_count - visible_rows : 0;
+
+	row_index = (size_t) (y - (tui_state.ap_box_top + 3));
+	if (row_index >= visible_rows) return (NULL);
+	if (ap_scroll + row_index >= ap_count) return (NULL);
+
+	return (ap_rows[ap_scroll + row_index]);
+}
+
+static int handle_mouse_event(void)
+{
+#ifdef HAVE_NCURSES
+	MEVENT event;
+	struct AP_info * ap_hit;
+	int target_focus;
+	int redraw = 0;
+
+	if (!use_ncurses_tui) return (0);
+	if (getmouse(&event) != OK) return (0);
+
+	if (event.bstate & BUTTON_SHIFT)
+		return (0);
+
+	target_focus = mouse_target_focus(event.x, event.y);
+
+	if (event.bstate & (BUTTON4_PRESSED | BUTTON4_CLICKED | BUTTON4_DOUBLE_CLICKED))
+	{
+		set_tui_focus(target_focus);
+		if (target_focus == 1)
+		{
+			if (tui_state.sta_scroll > 0)
+				tui_state.sta_scroll--;
+			redraw = 1;
+		}
+		else if (target_focus == 2)
+		{
+			if (tui_state.msg_scroll > 0)
+				tui_state.msg_scroll--;
+			set_message_follow_latest(0);
+			redraw = 1;
+		}
+		else if (tui_state.ap_scroll > 0)
+		{
+			tui_state.ap_scroll--;
+			redraw = 1;
+		}
+		return (redraw);
+	}
+
+	if (event.bstate & (BUTTON5_PRESSED | BUTTON5_CLICKED | BUTTON5_DOUBLE_CLICKED))
+	{
+		set_tui_focus(target_focus);
+		if (target_focus == 1)
+		{
+			tui_state.sta_scroll++;
+			redraw = 1;
+		}
+		else if (target_focus == 2)
+		{
+			tui_state.msg_scroll++;
+			set_message_follow_latest(0);
+			redraw = 1;
+		}
+		else
+		{
+			tui_state.ap_scroll++;
+			redraw = 1;
+		}
+		return (redraw);
+	}
+
+	if ((event.bstate
+		 & (BUTTON1_CLICKED | BUTTON1_PRESSED | BUTTON1_RELEASED | BUTTON1_DOUBLE_CLICKED))
+		== 0)
+	{
+		return (0);
+	}
+
+	ap_hit = pick_ap_from_mouse(event.x, event.y);
+	if (ap_hit != NULL)
+	{
+		set_selected_ap(ap_hit, selection_direction_no);
+		set_tui_focus(0);
+		return (1);
+	}
+
+	if (point_in_box(event.x,
+					 event.y,
+					 tui_state.ap_box_top,
+					 tui_state.ap_box_left,
+					 tui_state.ap_box_height,
+					 tui_state.ap_box_width))
+	{
+		set_tui_focus(0);
+		return (1);
+	}
+
+	if (point_in_box(event.x,
+					 event.y,
+					 tui_state.msg_box_top,
+					 tui_state.msg_box_left,
+					 tui_state.msg_box_height,
+					 tui_state.msg_box_width))
+	{
+		set_tui_focus(2);
+		return (1);
+	}
+
+	if (point_in_box(event.x,
+					 event.y,
+					 tui_state.sta_box_top,
+					 tui_state.sta_box_left,
+					 tui_state.sta_box_height,
+					 tui_state.sta_box_width))
+	{
+		set_tui_focus(1);
+		return (1);
+	}
+#endif
+
+	return (0);
+}
+
 static int handle_keycode(int keycode)
 {
 	int redraw = 0;
+
+	if (keycode == KEY_MOUSE)
+	{
+		if (handle_mouse_event())
+			redraw = 1;
+		goto done;
+	}
+
+	if (channel_entry_active)
+	{
+		if (keycode == 27 || keycode == KEY_ESCAPE)
+		{
+			cancel_channel_entry("][ channel entry cancelled");
+			redraw = 1;
+			goto done;
+		}
+
+		if (keycode == '\n' || keycode == '\r' || keycode == KEY_ENTER)
+		{
+			if (apply_channel_entry())
+			{
+				redraw = 1;
+			}
+			else
+			{
+				redraw = 1;
+			}
+			goto done;
+		}
+
+		if (keycode == KEY_BACKSPACE || keycode == 127 || keycode == 8)
+		{
+			if (channel_entry_len > 0)
+			{
+				channel_entry_buf[--channel_entry_len] = '\0';
+				set_channel_entry_prompt();
+				if (use_ncurses_tui)
+					render_output_view(0);
+			}
+			goto done;
+		}
+
+		if (isdigit((unsigned char) keycode))
+		{
+			if (channel_entry_len < sizeof(channel_entry_buf) - 1)
+			{
+				channel_entry_buf[channel_entry_len++] = (char) keycode;
+				channel_entry_buf[channel_entry_len] = '\0';
+				set_channel_entry_prompt();
+				if (use_ncurses_tui)
+					render_output_view(0);
+			}
+		}
+		goto done;
+	}
 
 	if (keycode == KEY_q)
 	{
@@ -4726,97 +5106,42 @@ static int handle_keycode(int keycode)
 	if (keycode == KEY_o)
 	{
 		if (use_ncurses_tui)
-			tui_state.colors_enabled = 1;
+			tui_state.colors_enabled = !tui_state.colors_enabled;
+		else if (colors_enabled)
+			color_off();
 		else
 			color_on();
-		snprintf(lopt.message, sizeof(lopt.message), "][ color on");
-		redraw = 1;
-	}
-
-	if (keycode == KEY_p)
-	{
-		if (use_ncurses_tui)
-			tui_state.colors_enabled = 0;
-		else
-			color_off();
-		snprintf(lopt.message, sizeof(lopt.message), "][ color off");
+		snprintf(lopt.message,
+				 sizeof(lopt.message),
+				 "][ color %s",
+				 (use_ncurses_tui ? tui_state.colors_enabled : colors_enabled) ? "on" : "off");
 		redraw = 1;
 	}
 
 	if (keycode == KEY_s)
 	{
-		lopt.sort_by++;
-
-		if (lopt.sort_by > MAX_SORT) lopt.sort_by = 0;
-
-		switch (lopt.sort_by)
+		if (use_ncurses_tui && tui_state.focus == 1)
 		{
-			case SORT_BY_NOTHING:
-				snprintf(lopt.message,
-						 sizeof(lopt.message),
-						 "][ sorting by first seen");
-				break;
-			case SORT_BY_BSSID:
-				snprintf(lopt.message,
-						 sizeof(lopt.message),
-						 "][ sorting by bssid");
-				break;
-			case SORT_BY_POWER:
-				snprintf(lopt.message,
-						 sizeof(lopt.message),
-						 "][ sorting by power level");
-				break;
-			case SORT_BY_BEACON:
-				snprintf(lopt.message,
-						 sizeof(lopt.message),
-						 "][ sorting by beacon number");
-				break;
-			case SORT_BY_DATA:
-				snprintf(lopt.message,
-						 sizeof(lopt.message),
-						 "][ sorting by number of data packets");
-				break;
-			case SORT_BY_PRATE:
-				snprintf(lopt.message,
-						 sizeof(lopt.message),
-						 "][ sorting by packet rate");
-				break;
-			case SORT_BY_CHAN:
-				snprintf(lopt.message,
-						 sizeof(lopt.message),
-						 "][ sorting by channel");
-				break;
-			case SORT_BY_MBIT:
-				snprintf(lopt.message,
-						 sizeof(lopt.message),
-						 "][ sorting by max data rate");
-				break;
-			case SORT_BY_ENC:
-				snprintf(lopt.message,
-						 sizeof(lopt.message),
-						 "][ sorting by encryption");
-				break;
-			case SORT_BY_CIPHER:
-				snprintf(lopt.message,
-						 sizeof(lopt.message),
-						 "][ sorting by cipher");
-				break;
-			case SORT_BY_AUTH:
-				snprintf(lopt.message,
-						 sizeof(lopt.message),
-						 "][ sorting by authentication");
-				break;
-			case SORT_BY_ESSID:
-				snprintf(lopt.message,
-						 sizeof(lopt.message),
-						 "][ sorting by ESSID");
-				break;
-			default:
-				break;
+			tui_state.sta_sort_by++;
+			if (tui_state.sta_sort_by > MAX_SORT) tui_state.sta_sort_by = 0;
+			snprintf(lopt.message,
+					 sizeof(lopt.message),
+					 "][ sorting stations by %s",
+					 sort_field_name(tui_state.sta_sort_by));
 		}
-		ALLEGE(pthread_mutex_lock(&(lopt.mx_sort)) == 0);
-		dump_sort();
-		ALLEGE(pthread_mutex_unlock(&(lopt.mx_sort)) == 0);
+		else
+		{
+			lopt.sort_by++;
+
+			if (lopt.sort_by > MAX_SORT) lopt.sort_by = 0;
+			snprintf(lopt.message,
+					 sizeof(lopt.message),
+					 "][ sorting APs by %s",
+					 sort_field_name(lopt.sort_by));
+			ALLEGE(pthread_mutex_lock(&(lopt.mx_sort)) == 0);
+			dump_sort();
+			ALLEGE(pthread_mutex_unlock(&(lopt.mx_sort)) == 0);
+		}
 		redraw = 1;
 	}
 
@@ -4843,6 +5168,25 @@ static int handle_keycode(int keycode)
 		redraw = 1;
 	}
 
+	if (keycode == 'M')
+	{
+		if (use_ncurses_tui)
+		{
+			airodump_tui_set_mouse_enabled(&tui_state, !tui_state.mouse_enabled);
+			snprintf(lopt.message,
+					 sizeof(lopt.message),
+					 "][ mouse capture %s",
+					 tui_state.mouse_enabled ? "enabled" : "disabled");
+			redraw = 1;
+		}
+	}
+
+	if (keycode == 'g')
+	{
+		begin_channel_entry();
+		goto done;
+	}
+
 	if (keycode == 'b')
 	{
 		if (switch_band())
@@ -4867,7 +5211,27 @@ static int handle_keycode(int keycode)
 	{
 		if (lopt.p_selected_ap != NULL)
 		{
-			lopt.mark_cur_ap = 1;
+			if (lopt.p_selected_ap->marked == 0)
+			{
+				lopt.p_selected_ap->marked = 1;
+				if (lopt.p_selected_ap->marked_color < 1
+					|| lopt.p_selected_ap->marked_color > TEXT_MAX_COLOR)
+					lopt.p_selected_ap->marked_color = 1;
+			}
+			else
+			{
+				lopt.p_selected_ap->marked = 0;
+			}
+			snprintf(lopt.message,
+					 sizeof(lopt.message),
+					 "][ %s AP %02X:%02X:%02X:%02X:%02X:%02X",
+					 lopt.p_selected_ap->marked ? "marked" : "unmarked",
+					 lopt.p_selected_ap->bssid[0],
+					 lopt.p_selected_ap->bssid[1],
+					 lopt.p_selected_ap->bssid[2],
+					 lopt.p_selected_ap->bssid[3],
+					 lopt.p_selected_ap->bssid[4],
+					 lopt.p_selected_ap->bssid[5]);
 			redraw = 1;
 		}
 	}
@@ -4912,8 +5276,7 @@ static int handle_keycode(int keycode)
 		}
 		else if (!use_ncurses_tui && lopt.p_selected_ap && lopt.p_selected_ap->prev)
 		{
-			lopt.p_selected_ap = lopt.p_selected_ap->prev;
-			lopt.en_selection_direction = selection_direction_down;
+			set_selected_ap(lopt.p_selected_ap->prev, selection_direction_down);
 			redraw = 1;
 		}
 	}
@@ -4933,23 +5296,37 @@ static int handle_keycode(int keycode)
 		}
 		else if (!use_ncurses_tui && lopt.p_selected_ap && lopt.p_selected_ap->next)
 		{
-			lopt.p_selected_ap = lopt.p_selected_ap->next;
-			lopt.en_selection_direction = selection_direction_up;
+			set_selected_ap(lopt.p_selected_ap->next, selection_direction_up);
 			redraw = 1;
 		}
 	}
 
 	if (keycode == KEY_i)
 	{
-		lopt.sort_inv *= -1;
-		if (lopt.sort_inv < 0)
-			snprintf(lopt.message,
-					 sizeof(lopt.message),
-					 "][ inverted sorting order");
+		if (use_ncurses_tui && tui_state.focus == 1)
+		{
+			tui_state.sta_sort_inv *= -1;
+			if (tui_state.sta_sort_inv < 0)
+				snprintf(lopt.message,
+						 sizeof(lopt.message),
+						 "][ inverted station sorting order");
+			else
+				snprintf(lopt.message,
+						 sizeof(lopt.message),
+						 "][ normal station sorting order");
+		}
 		else
-			snprintf(lopt.message,
-					 sizeof(lopt.message),
-					 "][ normal sorting order");
+		{
+			lopt.sort_inv *= -1;
+			if (lopt.sort_inv < 0)
+				snprintf(lopt.message,
+						 sizeof(lopt.message),
+						 "][ inverted sorting order");
+			else
+				snprintf(lopt.message,
+						 sizeof(lopt.message),
+						 "][ normal sorting order");
+		}
 		redraw = 1;
 	}
 
@@ -4962,8 +5339,7 @@ static int handle_keycode(int keycode)
 		}
 		else if (lopt.p_selected_ap == NULL)
 		{
-			lopt.p_selected_ap = lopt.ap_end;
-			lopt.en_selection_direction = selection_direction_down;
+			set_selected_ap(lopt.ap_end, selection_direction_down);
 			snprintf(lopt.message,
 					 sizeof(lopt.message),
 					 "][ enabled AP selection");
@@ -4972,8 +5348,7 @@ static int handle_keycode(int keycode)
 		}
 		else
 		{
-			lopt.en_selection_direction = selection_direction_no;
-			lopt.p_selected_ap = NULL;
+			set_selected_ap(NULL, selection_direction_no);
 			lopt.sort_by = SORT_BY_NOTHING;
 			snprintf(lopt.message,
 					 sizeof(lopt.message),
@@ -5040,9 +5415,7 @@ static int handle_keycode(int keycode)
 	{
 		if (use_ncurses_tui)
 		{
-			lopt.p_selected_ap = NULL;
-			lopt.en_selection_direction = selection_direction_no;
-			memset(lopt.selected_bssid, '\x00', 6);
+			set_selected_ap(NULL, selection_direction_no);
 			tui_state.ap_scroll = 0;
 			tui_state.sta_scroll = 0;
 			tui_state.msg_scroll = 0;
@@ -5057,6 +5430,8 @@ static int handle_keycode(int keycode)
 		}
 		redraw = 1;
 	}
+
+done:
 
 #ifdef HAVE_NCURSES
 	if (use_ncurses_tui)
@@ -5095,8 +5470,7 @@ static int handle_keycode(int keycode)
 
 				if (next_ap != NULL)
 				{
-					lopt.p_selected_ap = next_ap;
-					lopt.en_selection_direction = selection_direction_up;
+					set_selected_ap(next_ap, selection_direction_up);
 					redraw = 1;
 				}
 			}
@@ -5106,8 +5480,7 @@ static int handle_keycode(int keycode)
 
 				if (next_ap != NULL)
 				{
-					lopt.p_selected_ap = next_ap;
-					lopt.en_selection_direction = selection_direction_up;
+					set_selected_ap(next_ap, selection_direction_up);
 					redraw = 1;
 				}
 			}
@@ -5137,8 +5510,7 @@ static int handle_keycode(int keycode)
 
 				if (prev_ap != NULL)
 				{
-					lopt.p_selected_ap = prev_ap;
-					lopt.en_selection_direction = selection_direction_down;
+					set_selected_ap(prev_ap, selection_direction_down);
 					redraw = 1;
 				}
 			}
@@ -5148,8 +5520,7 @@ static int handle_keycode(int keycode)
 
 				if (prev_ap != NULL)
 				{
-					lopt.p_selected_ap = prev_ap;
-					lopt.en_selection_direction = selection_direction_down;
+					set_selected_ap(prev_ap, selection_direction_down);
 					redraw = 1;
 				}
 			}
@@ -5204,7 +5575,7 @@ static int handle_keycode(int keycode)
 			}
 			else
 			{
-				lopt.p_selected_ap = find_visible_ap_from_head();
+				set_selected_ap(find_visible_ap_from_head(), selection_direction_no);
 				tui_state.ap_scroll = 0;
 			}
 			redraw = 1;
@@ -5219,7 +5590,7 @@ static int handle_keycode(int keycode)
 				set_message_follow_latest(1);
 			}
 			else
-				lopt.p_selected_ap = find_visible_ap_from_tail();
+				set_selected_ap(find_visible_ap_from_tail(), selection_direction_no);
 			redraw = 1;
 		}
 	}
@@ -7193,6 +7564,193 @@ static int frequency_to_channel(int frequency)
 	return (frequency);
 }
 
+static int channel_is_valid_for_band(int channel)
+{
+	size_t i;
+
+	if (channel <= 0) return (0);
+
+	switch (lopt.band_mode)
+	{
+		case BAND_MODE_BG:
+			for (i = 0; bg_chans[i] != 0; i++)
+				if (bg_chans[i] == channel) return (1);
+			return (0);
+		case BAND_MODE_A:
+			for (i = 0; a_chans[i] != 0; i++)
+				if (a_chans[i] == channel) return (1);
+			return (0);
+		case BAND_MODE_AX:
+			for (i = 0; ax_chans[i] != 0; i++)
+				if (ax_chans[i] == channel) return (1);
+			return (0);
+		default:
+			return (channel_to_frequency(channel) > 0);
+	}
+}
+
+static int park_on_channel(int channel)
+{
+	struct wif * wi[MAX_CARDS];
+	int i;
+	int freq;
+
+	if (g_wi == NULL || g_wi[0] == NULL)
+	{
+		snprintf(lopt.message,
+				 sizeof(lopt.message),
+				 "][ no wireless interface available");
+		append_tui_message_history_now(lopt.message);
+		return (0);
+	}
+
+	if (!channel_is_valid_for_band(channel))
+	{
+		snprintf(lopt.message,
+				 sizeof(lopt.message),
+				 "][ channel %d is not valid for %s",
+				 channel,
+				 band_mode_label(lopt.band_mode));
+		append_tui_message_history_now(lopt.message);
+		return (0);
+	}
+
+	for (i = 0; i < MAX_CARDS; i++)
+		wi[i] = NULL;
+	for (i = 0; i < lopt.num_cards; i++)
+		wi[i] = g_wi[i];
+
+	stop_hopper();
+
+	if (lopt.freqoption)
+	{
+		freq = channel_to_frequency(channel);
+		if (freq <= 0)
+		{
+			snprintf(lopt.message,
+					 sizeof(lopt.message),
+					 "][ unable to map channel %d to a frequency",
+					 channel);
+			append_tui_message_history_now(lopt.message);
+			return (0);
+		}
+
+		for (i = 0; i < lopt.num_cards; i++)
+		{
+#ifdef CONFIG_LIBNL
+			if (wi_set_freq_ax(wi[i], freq, lopt.ax_bw, lopt.c_seg0, lopt.c_seg1)
+				!= 0)
+			{
+				snprintf(lopt.message,
+						 sizeof(lopt.message),
+						 "][ failed to tune to channel %d",
+						 channel);
+				append_tui_message_history_now(lopt.message);
+				return (0);
+			}
+#else
+			if (wi_set_freq(wi[i], freq) != 0)
+			{
+				snprintf(lopt.message,
+						 sizeof(lopt.message),
+						 "][ failed to tune to channel %d",
+						 channel);
+				append_tui_message_history_now(lopt.message);
+				return (0);
+			}
+#endif
+			lopt.frequency[i] = freq;
+		}
+		lopt.singlefreq = 1;
+		lopt.singlechan = 0;
+	}
+	else
+	{
+		for (i = 0; i < lopt.num_cards; i++)
+		{
+#ifdef CONFIG_LIBNL
+			if (wi_set_ht_channel(wi[i], channel, lopt.htval) != 0)
+			{
+				snprintf(lopt.message,
+						 sizeof(lopt.message),
+						 "][ failed to tune to channel %d",
+						 channel);
+				append_tui_message_history_now(lopt.message);
+				return (0);
+			}
+#else
+			if (wi_set_channel(wi[i], channel) != 0)
+			{
+				snprintf(lopt.message,
+						 sizeof(lopt.message),
+						 "][ failed to tune to channel %d",
+						 channel);
+				append_tui_message_history_now(lopt.message);
+				return (0);
+			}
+#endif
+			lopt.channel[i] = channel;
+		}
+		lopt.singlechan = 1;
+		lopt.singlefreq = 0;
+	}
+
+	return (1);
+}
+
+static void begin_channel_entry(void)
+{
+	channel_entry_active = 1;
+	channel_entry_len = 0;
+	channel_entry_buf[0] = '\0';
+	set_channel_entry_prompt();
+	if (use_ncurses_tui)
+		render_output_view(0);
+}
+
+static void cancel_channel_entry(const char * message)
+{
+	channel_entry_active = 0;
+	channel_entry_len = 0;
+	channel_entry_buf[0] = '\0';
+	channel_entry_prompt[0] = '\0';
+	if (message != NULL)
+		snprintf(lopt.message, sizeof(lopt.message), "%s", message);
+}
+
+static int apply_channel_entry(void)
+{
+	int channel;
+	int frequency;
+
+	channel = atoi(channel_entry_buf);
+	channel_entry_active = 0;
+	channel_entry_len = 0;
+	channel_entry_buf[0] = '\0';
+	channel_entry_prompt[0] = '\0';
+
+	if (channel <= 0)
+	{
+		snprintf(lopt.message,
+				 sizeof(lopt.message),
+				 "][ invalid channel entry");
+		append_tui_message_history_now(lopt.message);
+		return (0);
+	}
+
+	if (!park_on_channel(channel))
+		return (0);
+
+	frequency = channel_to_frequency(channel);
+	snprintf(lopt.message,
+			 sizeof(lopt.message),
+			 "][ channel %d selected (%d MHz)",
+			 channel,
+			 frequency);
+	append_tui_message_history_now(lopt.message);
+	return (1);
+}
+
 static void stop_hopper(void)
 {
 	int status;
@@ -7341,8 +7899,25 @@ static const char * band_mode_label(int band_mode)
 		case BAND_MODE_AX:
 			return ("6 GHz");
 		default:
-			return ("custom");
+			return ("2.4 GHz");
 	}
+}
+
+static int infer_band_mode(void)
+{
+	if (lopt.scan_11ax)
+		return (BAND_MODE_AX);
+
+	if (lopt.channels == (int *) a_chans)
+		return (BAND_MODE_A);
+
+	if (lopt.channels == (int *) bg_chans)
+		return (BAND_MODE_BG);
+
+	if (lopt.channel[0] > 14)
+		return (BAND_MODE_A);
+
+	return (BAND_MODE_BG);
 }
 
 static int build_ax_frequency_list(int ** freqs_out)
@@ -8511,11 +9086,6 @@ int main(int argc, char * argv[])
 				break;
 
 			case 'b':
-				if (lopt.chanoption == 1)
-				{
-					printf("Notice: Channel range already given\n");
-					break;
-				}
 				freq[0] = freq[1] = freq[2] = 0; // freq[0] for b/g, freq[1] for a, freq[2] for ax
 
 				for (i = 0; i < (int) strlen(optarg); i++) //-V814
@@ -9040,14 +9610,7 @@ int main(int argc, char * argv[])
 	if (lopt.show_wps && lopt.show_manufacturer)
 		lopt.maxsize_essid_seen += lopt.maxsize_wps_seen;
 
-	if (lopt.freqoption)
-		lopt.band_mode = lopt.scan_11ax ? BAND_MODE_AX : BAND_MODE_CUSTOM;
-	else if (lopt.channels == (int *) a_chans)
-		lopt.band_mode = BAND_MODE_A;
-	else if (lopt.channels == (int *) bg_chans)
-		lopt.band_mode = BAND_MODE_BG;
-	else
-		lopt.band_mode = BAND_MODE_CUSTOM;
+	lopt.band_mode = infer_band_mode();
 
 	if (lopt.s_iface != NULL)
 	{

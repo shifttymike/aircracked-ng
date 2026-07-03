@@ -21,9 +21,24 @@ struct airodump_tui_state
 	int focus; /* 0 = AP pane, 1 = station pane, 2 = message pane */
 	int resize_pending;
 	int colors_enabled;
+	int mouse_enabled;
+	int sta_sort_by;
+	int sta_sort_inv;
 	int ap_visible_rows;
 	int sta_visible_rows;
 	int msg_visible_rows;
+	int ap_box_top;
+	int ap_box_left;
+	int ap_box_width;
+	int ap_box_height;
+	int sta_box_top;
+	int sta_box_left;
+	int sta_box_width;
+	int sta_box_height;
+	int msg_box_top;
+	int msg_box_left;
+	int msg_box_width;
+	int msg_box_height;
 };
 
 struct airodump_tui_message_entry
@@ -70,6 +85,7 @@ int airodump_tui_available(void);
 int airodump_tui_start(struct airodump_tui_state * state);
 void airodump_tui_stop(struct airodump_tui_state * state);
 int airodump_tui_getch(struct airodump_tui_state * state);
+void airodump_tui_set_mouse_enabled(struct airodump_tui_state * state, int enabled);
 void airodump_tui_render(struct airodump_tui_state * state,
 						 const struct airodump_tui_view * view);
 

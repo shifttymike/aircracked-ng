@@ -26,6 +26,55 @@
 extern int is_filtered_essid(const uint8_t * essid);
 
 #ifdef HAVE_NCURSES
+static void apply_mouse_mask(struct airodump_tui_state * state)
+{
+	if (state == NULL || !state->active) return;
+
+	if (state->mouse_enabled)
+	{
+		mousemask(BUTTON1_CLICKED | BUTTON1_DOUBLE_CLICKED | BUTTON2_CLICKED
+					  | BUTTON4_CLICKED | BUTTON5_CLICKED,
+				  NULL);
+	}
+	else
+	{
+		mousemask(0, NULL);
+	}
+}
+
+static const char * sort_field_label(int sort_by)
+{
+	switch (sort_by)
+	{
+		case SORT_BY_NOTHING:
+			return ("first seen");
+		case SORT_BY_BSSID:
+			return ("bssid");
+		case SORT_BY_POWER:
+			return ("power level");
+		case SORT_BY_BEACON:
+			return ("beacon number");
+		case SORT_BY_DATA:
+			return ("number of data packets");
+		case SORT_BY_PRATE:
+			return ("packet rate");
+		case SORT_BY_CHAN:
+			return ("channel");
+		case SORT_BY_MBIT:
+			return ("max data rate");
+		case SORT_BY_ENC:
+			return ("encryption");
+		case SORT_BY_CIPHER:
+			return ("cipher");
+		case SORT_BY_AUTH:
+			return ("authentication");
+		case SORT_BY_ESSID:
+			return ("ESSID");
+		default:
+			return ("power level");
+	}
+}
+
 static int ap_visible(const struct AP_info * ap, const struct airodump_tui_view * view)
 {
 	REQUIRE(ap != NULL);
@@ -140,6 +189,8 @@ static size_t collect_visible_aps(struct AP_info * ap_end,
 
 static size_t collect_visible_stations(struct ST_info * st_1st,
 									   const struct airodump_tui_view * view,
+									   int sort_by,
+									   int sort_inv,
 									   struct ST_info *** out_rows)
 {
 	size_t count = 0;
@@ -168,6 +219,87 @@ static size_t collect_visible_stations(struct ST_info * st_1st,
 		}
 
 		st_cur = st_cur->next;
+	}
+
+	if (count > 1 && sort_by != SORT_BY_NOTHING)
+	{
+		size_t i;
+		size_t j;
+
+		for (i = 0; i < count - 1; i++)
+		{
+			size_t best = i;
+
+			for (j = i + 1; j < count; j++)
+			{
+				const struct ST_info * lhs = rows[j];
+				const struct ST_info * rhs = rows[best];
+				int cmp = 0;
+
+				switch (sort_by)
+				{
+					case SORT_BY_BSSID:
+						cmp = memcmp(lhs->stmac, rhs->stmac, 6);
+						break;
+					case SORT_BY_POWER:
+						cmp = lhs->power - rhs->power;
+						break;
+					case SORT_BY_BEACON:
+					case SORT_BY_DATA:
+						cmp = (int) lhs->nb_pkt - (int) rhs->nb_pkt;
+						break;
+					case SORT_BY_PRATE:
+						cmp = (MAX(lhs->rate_to, lhs->rate_from)
+							   - MAX(rhs->rate_to, rhs->rate_from));
+						break;
+					case SORT_BY_CHAN:
+						cmp = lhs->channel - rhs->channel;
+						break;
+					case SORT_BY_MBIT:
+						cmp = (MAX(lhs->rate_to, lhs->rate_from)
+							   - MAX(rhs->rate_to, rhs->rate_from));
+						break;
+					case SORT_BY_ENC:
+						cmp = (lhs->base != NULL ? (int) (lhs->base->security & STD_FIELD)
+												 : 0)
+							  - (rhs->base != NULL ? (int) (rhs->base->security & STD_FIELD)
+												   : 0);
+						break;
+					case SORT_BY_CIPHER:
+						cmp = (lhs->base != NULL ? (int) (lhs->base->security & ENC_FIELD)
+												 : 0)
+							  - (rhs->base != NULL ? (int) (rhs->base->security & ENC_FIELD)
+												   : 0);
+						break;
+					case SORT_BY_AUTH:
+						cmp = (lhs->base != NULL ? (int) (lhs->base->security & AUTH_FIELD)
+												 : 0)
+							  - (rhs->base != NULL ? (int) (rhs->base->security & AUTH_FIELD)
+												   : 0);
+						break;
+					case SORT_BY_ESSID:
+						cmp = strncasecmp((const char *) lhs->essid,
+										  (const char *) rhs->essid,
+										  ESSID_LENGTH);
+						break;
+					default:
+						cmp = lhs->tinit > rhs->tinit ? 1 : (lhs->tinit < rhs->tinit ? -1 : 0);
+						break;
+				}
+
+				if (cmp == 0 && sort_by != SORT_BY_NOTHING)
+					cmp = memcmp(lhs->stmac, rhs->stmac, 6);
+
+				if ((cmp * sort_inv) < 0) best = j;
+			}
+
+			if (best != i)
+			{
+				struct ST_info * tmp = rows[i];
+				rows[i] = rows[best];
+				rows[best] = tmp;
+			}
+		}
 	}
 
 	*out_rows = rows;
@@ -437,7 +569,7 @@ static void render_ap_row(int y,
 						  const struct airodump_tui_view * view)
 {
 	char line[1024];
-	char stas[8];
+	char stas[16];
 	char cipher[32];
 	char auth[32];
 	const char * std;
@@ -538,7 +670,7 @@ static size_t measure_ap_row_width(const struct AP_info * ap,
 								   const struct airodump_tui_view * view)
 {
 	char line[1024];
-	char stas[8];
+	char stas[16];
 	char cipher[32];
 	char auth[32];
 	const char * std;
@@ -923,11 +1055,26 @@ static void render_status_line(const struct airodump_tui_state * state,
 		strlcat(line, " [STA only]", sizeof(line));
 	}
 
+	strlcat(line, state->mouse_enabled ? " mouse:on" : " mouse:off", sizeof(line));
+
 	strlcat(line, "  c clear AP filter", sizeof(line));
+	strlcat(line, "  g go to channel", sizeof(line));
 	strlcat(line, "  d run log_sta", sizeof(line));
 	strlcat(line, "  b switch band", sizeof(line));
 	strlcat(line, "  r resume hop", sizeof(line));
 	strlcat(line, "  R realtime sort", sizeof(line));
+	strlcat(line, "  m mark AP", sizeof(line));
+	strlcat(line, "  o colors", sizeof(line));
+	if (state->focus == 1)
+	{
+		strlcat(line, "  STA sort:", sizeof(line));
+		strlcat(line, sort_field_label(state->sta_sort_by), sizeof(line));
+	}
+	else
+	{
+		strlcat(line, "  AP sort:", sizeof(line));
+		strlcat(line, sort_field_label(view->sort_by), sizeof(line));
+	}
 
 	if (view->do_pause)
 		strlcat(line, " paused", sizeof(line));
@@ -994,8 +1141,13 @@ int airodump_tui_start(struct airodump_tui_state * state)
 	keypad(stdscr, TRUE);
 	nodelay(stdscr, TRUE);
 	set_escdelay(25);
+	mouseinterval(0);
 	curs_set(0);
 	ensure_colors(state);
+	state->mouse_enabled = 1;
+	state->sta_sort_by = SORT_BY_NOTHING;
+	state->sta_sort_inv = 1;
+	apply_mouse_mask(state);
 
 	getmaxyx(stdscr, state->rows, state->cols);
 	state->active = 1;
@@ -1009,6 +1161,13 @@ void airodump_tui_stop(struct airodump_tui_state * state)
 	if (state == NULL || !state->active) return;
 	endwin();
 	state->active = 0;
+}
+
+void airodump_tui_set_mouse_enabled(struct airodump_tui_state * state, int enabled)
+{
+	if (state == NULL) return;
+	state->mouse_enabled = enabled ? 1 : 0;
+	apply_mouse_mask(state);
 }
 
 int airodump_tui_getch(struct airodump_tui_state * state)
@@ -1079,6 +1238,18 @@ void airodump_tui_render(struct airodump_tui_state * state,
 	}
 	top_height = ap_height;
 	ap_box_width = state->cols;
+	state->ap_box_top = 0;
+	state->ap_box_left = 0;
+	state->ap_box_width = 0;
+	state->ap_box_height = 0;
+	state->msg_box_top = 0;
+	state->msg_box_left = 0;
+	state->msg_box_width = 0;
+	state->msg_box_height = 0;
+	state->sta_box_top = 0;
+	state->sta_box_left = 0;
+	state->sta_box_width = 0;
+	state->sta_box_height = 0;
 
 	if (view->show_sta)
 	{
@@ -1155,6 +1326,10 @@ void airodump_tui_render(struct airodump_tui_state * state,
 
 		ap_box_top = 1;
 		ap_box_left = 0;
+		state->ap_box_top = ap_box_top;
+		state->ap_box_left = ap_box_left;
+		state->ap_box_width = ap_box_width;
+		state->ap_box_height = ap_height;
 		render_pane_box(ap_box_top, ap_box_left, ap_height, ap_box_width, " Access Points", state->focus == 0);
 		render_ap_header_row(ap_box_top + 1, ap_box_left + 1, ap_box_width - 2, view);
 		ap_start = (size_t) state->ap_scroll;
@@ -1215,6 +1390,10 @@ void airodump_tui_render(struct airodump_tui_state * state,
 		{
 			msg_box_top = 1;
 			msg_box_left = ap_box_width;
+			state->msg_box_top = msg_box_top;
+			state->msg_box_left = msg_box_left;
+			state->msg_box_width = msg_box_width;
+			state->msg_box_height = top_height;
 			render_pane_box(msg_box_top, msg_box_left, top_height, msg_box_width, title, state->focus == 2);
 		}
 
@@ -1304,10 +1483,18 @@ void airodump_tui_render(struct airodump_tui_state * state,
 		body_top = sta_box_top + 1;
 		sta_box_left = 0;
 		sta_box_width = state->cols;
+		state->sta_box_top = sta_box_top;
+		state->sta_box_left = sta_box_left;
+		state->sta_box_width = sta_box_width;
+		state->sta_box_height = sta_height;
 		render_pane_box(sta_box_top, sta_box_left, sta_height, sta_box_width, header, state->focus == 1);
 		render_station_header_row(body_top, 1, sta_box_width - 2);
 
-		st_count = collect_visible_stations(view->st_1st, view, &st_rows);
+		st_count = collect_visible_stations(view->st_1st,
+											view,
+											state->sta_sort_by,
+											state->sta_sort_inv,
+											&st_rows);
 		if (st_count == 0)
 		{
 			draw_padded_line(body_top + 1, 1, sta_box_width - 2, " No stations match the current filters.");
