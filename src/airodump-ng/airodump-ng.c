@@ -4930,7 +4930,6 @@ static void log_distinct_probe_essid(const struct ST_info * st_cur,
 
 	if (st_cur == NULL || probe == NULL || len == 0) return;
 	if (!opt.output_format_probes || opt.f_probes == NULL) return;
-	if (probe_seen_globally(probe, len)) return;
 
 	ltime = localtime(&st_cur->tlast);
 	if (ltime == NULL) return;
