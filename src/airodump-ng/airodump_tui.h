@@ -18,7 +18,8 @@
 #define STA_SORT_BY_FRAMES 6
 #define STA_SORT_BY_NOTES 7
 #define STA_SORT_BY_PROBES 8
-#define STA_SORT_MAX 8
+#define STA_SORT_BY_LAST_SEEN 9
+#define STA_SORT_MAX 9
 
 enum airodump_tui_message_style
 {
@@ -108,5 +109,11 @@ int airodump_tui_getch(struct airodump_tui_state * state);
 void airodump_tui_set_mouse_enabled(struct airodump_tui_state * state, int enabled);
 void airodump_tui_render(struct airodump_tui_state * state,
 						 const struct airodump_tui_view * view);
+int airodump_tui_ap_sort_field_from_mouse(const struct airodump_tui_state * state,
+										  int x,
+										  int y);
+int airodump_tui_station_sort_field_from_mouse(const struct airodump_tui_state * state,
+											   int x,
+											   int y);
 
 #endif

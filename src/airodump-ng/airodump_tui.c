@@ -26,6 +26,16 @@
 extern int is_filtered_essid(const uint8_t * essid);
 
 #ifdef HAVE_NCURSES
+static long long station_age_seconds(const struct ST_info * st);
+static void fill_inner_width(int y, int x, int width);
+static void append_padded_column(char * line,
+								 size_t line_size,
+								 size_t * used,
+								 const char * text,
+								 int width,
+								 int right_align,
+								 int separator_spaces);
+
 static void apply_mouse_mask(struct airodump_tui_state * state)
 {
 	if (state == NULL || !state->active) return;
@@ -40,6 +50,265 @@ static void apply_mouse_mask(struct airodump_tui_state * state)
 	{
 		mousemask(0, NULL);
 	}
+}
+
+struct station_header_field
+{
+	int sort_by;
+	const char * label;
+	int width;
+	int right_align;
+	int separator_spaces;
+};
+
+struct station_header_span
+{
+	int sort_by;
+	size_t start;
+	size_t end;
+	size_t label_start;
+	size_t label_len;
+};
+
+struct ap_header_field
+{
+	int sort_by;
+	const char * label;
+	int width;
+	int right_align;
+	int separator_spaces;
+};
+
+struct ap_header_span
+{
+	int sort_by;
+	size_t start;
+	size_t end;
+	size_t label_start;
+	size_t label_len;
+};
+
+static const struct ap_header_field ap_header_fields[] = {
+	{ SORT_BY_BSSID, "BSSID", 17, 0, 1 },
+	{ SORT_BY_POWER, "PWR", 3, 1, 2 },
+	{ SORT_BY_BEACON, "Beacons", 8, 1, 2 },
+	{ SORT_BY_DATA, "#Data", 8, 1, 2 },
+	{ SORT_BY_PRATE, "#/s", 4, 1, 2 },
+	{ SORT_BY_CHAN, "CH", 3, 1, 2 },
+	{ -1, "STAs", 4, 1, 2 },
+	{ SORT_BY_ENC, "ENC", 4, 0, 1 },
+	{ SORT_BY_CIPHER, "CIPHER", 7, 0, 1 },
+	{ SORT_BY_AUTH, "AUTH", 4, 0, 1 },
+	{ SORT_BY_ESSID, "ESSID", 0, 0, 2 },
+};
+
+static size_t ap_header_label_offset(const struct ap_header_field * field)
+{
+	size_t offset = (size_t) field->separator_spaces;
+
+	if (field->right_align)
+	{
+		size_t label_len = strlen(field->label);
+
+		if (field->width > (int) label_len)
+			offset += (size_t) field->width - label_len;
+	}
+
+	return (offset);
+}
+
+static size_t build_ap_header_line(char * line,
+								   size_t line_size,
+								   struct ap_header_span * spans,
+								   size_t span_count,
+								   const struct airodump_tui_view * view)
+{
+	size_t used = 1;
+	size_t i;
+
+	line[0] = ' ';
+	for (i = 0; i < sizeof(ap_header_fields) / sizeof(ap_header_fields[0]); i++)
+	{
+		if (spans != NULL && i < span_count)
+		{
+			spans[i].sort_by = ap_header_fields[i].sort_by;
+			spans[i].start = used;
+			spans[i].label_start = used + ap_header_label_offset(&ap_header_fields[i]);
+			spans[i].label_len = strlen(ap_header_fields[i].label);
+		}
+		append_padded_column(line,
+							 line_size,
+							 &used,
+							 ap_header_fields[i].label,
+							 ap_header_fields[i].width,
+							 ap_header_fields[i].right_align,
+							 ap_header_fields[i].separator_spaces);
+		if (spans != NULL && i < span_count)
+			spans[i].end = used;
+	}
+	if (view->show_uptime && used < line_size - 1)
+		append_padded_column(line, line_size, &used, "UPTIME", 14, 0, 1);
+	if (view->show_wps && used < line_size - 1)
+		append_padded_column(line, line_size, &used, "WPS", 4, 0, 2);
+	if (view->show_manufacturer && used < line_size - 1)
+		append_padded_column(line, line_size, &used, "MANUFACTURER", 12, 0, 2);
+	if (used < line_size - 1)
+		append_padded_column(line, line_size, &used, "ESSID", 0, 0, 2);
+
+	line[used] = '\0';
+	return (used);
+}
+
+static const struct station_header_field station_header_fields[] = {
+	{ STA_SORT_BY_BSSID, "BSSID", 17, 0, 1 },
+	{ STA_SORT_BY_STATION, "STATION", 17, 0, 2 },
+	{ STA_SORT_BY_POWER, "PWR", 3, 1, 2 },
+	{ STA_SORT_BY_RATE, "Rate", 4, 0, 2 },
+	{ STA_SORT_BY_LOST, "Lost", 4, 0, 2 },
+	{ STA_SORT_BY_FRAMES, "Frames", 6, 0, 2 },
+	{ STA_SORT_BY_LAST_SEEN, "Last seen", 9, 0, 2 },
+	{ STA_SORT_BY_NOTES, "Notes", 5, 0, 2 },
+	{ STA_SORT_BY_PROBES, "Probes", 6, 0, 2 },
+};
+
+static size_t station_header_label_offset(const struct station_header_field * field)
+{
+	size_t offset = (size_t) field->separator_spaces;
+
+	if (field->right_align)
+	{
+		size_t label_len = strlen(field->label);
+
+		if (field->width > (int) label_len)
+			offset += (size_t) field->width - label_len;
+	}
+
+	return (offset);
+}
+
+static size_t build_station_header_line(char * line,
+										size_t line_size,
+										struct station_header_span * spans,
+										size_t span_count,
+										const struct airodump_tui_view * view)
+{
+	size_t used = 1;
+	size_t i;
+
+	line[0] = ' ';
+	for (i = 0; i < sizeof(station_header_fields) / sizeof(station_header_fields[0]); i++)
+	{
+		if (spans != NULL && i < span_count)
+		{
+			spans[i].sort_by = station_header_fields[i].sort_by;
+			spans[i].start = used;
+			spans[i].label_start = used + station_header_label_offset(&station_header_fields[i]);
+			spans[i].label_len = strlen(station_header_fields[i].label);
+		}
+		append_padded_column(line,
+							 line_size,
+							 &used,
+							 station_header_fields[i].label,
+							 station_header_fields[i].width,
+							 station_header_fields[i].right_align,
+							 station_header_fields[i].separator_spaces);
+		if (spans != NULL && i < span_count)
+			spans[i].end = used;
+	}
+	if (view->show_uptime && used < line_size - 1)
+		append_padded_column(line, line_size, &used, "UPTIME", 14, 0, 1);
+	if (view->show_wps && used < line_size - 1)
+		append_padded_column(line, line_size, &used, "WPS", 4, 0, 2);
+	if (view->show_manufacturer && used < line_size - 1)
+		append_padded_column(line, line_size, &used, "MANUFACTURER", 12, 0, 2);
+	if (used < line_size - 1)
+		append_padded_column(line, line_size, &used, "ESSID", 0, 0, 2);
+
+	line[used] = '\0';
+	return (used);
+}
+
+static void render_station_header_row(int y,
+									 int x,
+									 int width,
+									 const struct airodump_tui_state * state,
+									 const struct airodump_tui_view * view)
+{
+	char line[1024];
+	struct station_header_span spans[sizeof(station_header_fields) / sizeof(station_header_fields[0])];
+	size_t used;
+	size_t i;
+
+	used = build_station_header_line(line, sizeof(line), spans, sizeof(spans) / sizeof(spans[0]), view);
+	if (width < 1) width = 1;
+	if (width > (int) sizeof(line) - 1) width = (int) sizeof(line) - 1;
+	line[width] = '\0';
+
+	attron(A_DIM);
+	mvaddnstr(y, x, line, width);
+	for (i = 0; i < sizeof(spans) / sizeof(spans[0]); i++)
+	{
+		if (spans[i].sort_by != state->sta_sort_by)
+			continue;
+		if (spans[i].label_start < (size_t) width)
+		{
+			int highlight_len = (int) spans[i].label_len;
+			int highlight_x = x + (int) spans[i].label_start;
+
+			if (highlight_len > width - (int) spans[i].label_start)
+				highlight_len = width - (int) spans[i].label_start;
+			if (highlight_len > 0)
+				mvchgat(y,
+						highlight_x,
+						highlight_len,
+						A_BOLD,
+						state->colors_enabled ? 7 : 0,
+						NULL);
+		}
+		break;
+	}
+	fill_inner_width(y, x + (int) used, width - (int) used);
+	attroff(A_DIM);
+}
+
+int airodump_tui_station_sort_field_from_mouse(const struct airodump_tui_state * state,
+											   int x,
+											   int y)
+{
+	char line[1024];
+	struct station_header_span spans[sizeof(station_header_fields) / sizeof(station_header_fields[0])];
+	struct airodump_tui_view view = { 0 };
+	size_t used;
+	size_t i;
+	size_t inner_left;
+	size_t inner_right;
+
+	if (state == NULL) return (STA_SORT_BY_NOTHING);
+	if (y != state->sta_box_top + 1) return (STA_SORT_BY_NOTHING);
+	if (state->sta_box_width < 3) return (STA_SORT_BY_NOTHING);
+	if (x < state->sta_box_left + 1 || x >= state->sta_box_left + state->sta_box_width - 1)
+		return (STA_SORT_BY_NOTHING);
+
+	used = build_station_header_line(line,
+									 sizeof(line),
+									 spans,
+									 sizeof(spans) / sizeof(spans[0]),
+									 &view);
+	(void) used;
+
+	inner_left = (size_t) (state->sta_box_left + 1);
+	inner_right = (size_t) (state->sta_box_left + state->sta_box_width - 1);
+
+	for (i = 0; i < sizeof(spans) / sizeof(spans[0]); i++)
+	{
+		size_t start = inner_left + spans[i].start;
+		size_t end = inner_left + spans[i].end;
+
+		if ((size_t) x >= start && (size_t) x < end && (size_t) x < inner_right)
+			return (spans[i].sort_by);
+	}
+
+	return (STA_SORT_BY_NOTHING);
 }
 
 static int ap_visible(const struct AP_info * ap, const struct airodump_tui_view * view)
@@ -256,6 +525,14 @@ static size_t collect_visible_stations(struct ST_info * st_1st,
 						cmp = lhs_count - rhs_count;
 						break;
 					}
+					case STA_SORT_BY_LAST_SEEN:
+					{
+						long long lhs_age = station_age_seconds(lhs);
+						long long rhs_age = station_age_seconds(rhs);
+
+						cmp = (lhs_age > rhs_age) ? 1 : (lhs_age < rhs_age ? -1 : 0);
+						break;
+					}
 					default:
 						cmp = lhs->tinit > rhs->tinit ? 1 : (lhs->tinit < rhs->tinit ? -1 : 0);
 						break;
@@ -348,6 +625,8 @@ static void security_auth_string(char * out, size_t len, unsigned int security)
 
 static int power_pair(const struct AP_info * ap)
 {
+	if (ap != NULL && memcmp(ap->bssid, BROADCAST, 6) == 0)
+		return (6);
 	if (ap->marked && ap->marked_color >= 1 && ap->marked_color <= 7)
 		return (ap->marked_color);
 
@@ -357,14 +636,50 @@ static int power_pair(const struct AP_info * ap)
 	return (5);
 }
 
+static int station_color_pair(const struct ST_info * st)
+{
+	if (st == NULL) return (0);
+	if (st->marked && st->marked_color >= 1 && st->marked_color <= 7)
+		return (st->marked_color);
+	if ((st->stmac[0] & 0x02) != 0)
+		return (6);
+	return (0);
+}
+
+static long long station_age_seconds(const struct ST_info * st)
+{
+	time_t now;
+
+	if (st == NULL) return (0);
+
+	now = time(NULL);
+	if (st->tlast > now)
+		return (0);
+	return ((long long) now - (long long) st->tlast);
+}
+
+static void format_station_last_seen(const struct ST_info * st,
+									 char * out,
+									 size_t out_len)
+{
+	long long age;
+
+	if (st == NULL || out == NULL || out_len == 0)
+		return;
+
+	age = station_age_seconds(st);
+
+	snprintf(out, out_len, "%02lld:%02lld", age / 60, age % 60);
+}
+
 static void format_bss_load_station_count(const struct AP_info * ap,
 										  char * out,
 										  size_t out_len)
 {
 	if (ap != NULL && ap->bss_load_station_count >= 0)
-		snprintf(out, out_len, "%5d", ap->bss_load_station_count);
+		snprintf(out, out_len, "%4d", ap->bss_load_station_count);
 	else
-		strlcpy(out, "    ?", out_len);
+		strlcpy(out, "   ?", out_len);
 }
 
 static void fill_inner_width(int y, int x, int width)
@@ -373,59 +688,162 @@ static void fill_inner_width(int y, int x, int width)
 		mvhline(y, x, ' ', width);
 }
 
+static void append_padded_column(char * line,
+								 size_t line_size,
+								 size_t * used,
+								 const char * text,
+								 int width,
+								 int right_align,
+								 int separator_spaces)
+{
+	char tmp[128];
+	int written;
+	int i;
+
+	if (line == NULL || used == NULL || text == NULL || width < 0
+		|| separator_spaces < 0)
+		return;
+
+	while (separator_spaces-- > 0 && *used < line_size - 1)
+		line[(*used)++] = ' ';
+
+	if (*used >= line_size - 1) return;
+
+	written = snprintf(tmp,
+					   sizeof(tmp),
+					   right_align ? "%*s" : "%-*s",
+					   width,
+					   text);
+	if (written < 0) return;
+	if (written > (int) sizeof(tmp) - 1) written = (int) sizeof(tmp) - 1;
+
+	for (i = 0; i < written && *used < line_size - 1; i++)
+		line[(*used)++] = tmp[i];
+	line[*used] = '\0';
+}
+
+static void append_ap_core_columns(char * line,
+								   size_t line_size,
+								   size_t * used,
+								   const char * bssid,
+								   const char * power,
+								   const char * beacons,
+								   const char * data,
+								   const char * rate,
+								   const char * channel,
+								   const char * stas,
+								   const char * std,
+								   const char * cipher,
+								   const char * auth)
+{
+	append_padded_column(line, line_size, used, bssid, 17, 0, 1);
+	append_padded_column(line, line_size, used, power, 3, 1, 2);
+	append_padded_column(line, line_size, used, beacons, 8, 1, 2);
+	append_padded_column(line, line_size, used, data, 8, 1, 2);
+	append_padded_column(line, line_size, used, rate, 4, 1, 2);
+	append_padded_column(line, line_size, used, channel, 3, 1, 2);
+	append_padded_column(line, line_size, used, stas, 4, 1, 2);
+	append_padded_column(line, line_size, used, std, 4, 0, 1);
+	append_padded_column(line, line_size, used, cipher, 7, 0, 1);
+	append_padded_column(line, line_size, used, auth, 4, 0, 1);
+}
+
 static void render_ap_header_row(int y,
 								 int x,
 								 int width,
+								 const struct airodump_tui_state * state,
 								 const struct airodump_tui_view * view)
 {
 	char line[1024];
-	size_t used = 0;
+	struct ap_header_span spans[sizeof(ap_header_fields) / sizeof(ap_header_fields[0])];
+	size_t used = 1;
+	size_t i;
 
-	line[0] = ' ';
-	used = snprintf(line + 1,
-					sizeof(line) - 1,
-					" %-17s  %3s  %8s  %8s  %4s  %3s  %5s  %4s %-7s %-4s",
-					"BSSID",
-					"PWR",
-					"Beacons",
-					"#Data",
-					"#/s",
-					"CH",
-					"STAs",
-					"ENC",
-					"CIPHER",
-					"AUTH");
-	if (view->show_uptime && used < sizeof(line) - 1)
-		used += snprintf(line + 1 + used, sizeof(line) - 1 - used, " %14s", "UPTIME");
-	if (view->show_wps && used < sizeof(line) - 1)
-		used += snprintf(line + 1 + used, sizeof(line) - 1 - used, "  %-4s", "WPS");
-	if (view->show_manufacturer && used < sizeof(line) - 1)
-		used += snprintf(line + 1 + used, sizeof(line) - 1 - used, "  %-12s", "MANUFACTURER");
-	if (used < sizeof(line) - 1)
-		used += snprintf(line + 1 + used, sizeof(line) - 1 - used, "  %s", "ESSID");
+	used = build_ap_header_line(line,
+								sizeof(line),
+								spans,
+								sizeof(spans) / sizeof(spans[0]),
+								view);
 
 	if (width < 1) width = 1;
 	if (width > (int) sizeof(line) - 1) width = (int) sizeof(line) - 1;
 	line[width] = '\0';
-	attron(A_BOLD);
-	mvaddnstr(y, x, line, width);
-	fill_inner_width(y, x + (int) strlen(line), width - (int) strlen(line));
-	attroff(A_BOLD);
+		if (state != NULL)
+		{
+			attron(A_DIM);
+			mvaddnstr(y, x, line, width);
+			for (i = 0; i < sizeof(spans) / sizeof(spans[0]); i++)
+			{
+				if (spans[i].sort_by != view->sort_by)
+					continue;
+				if (spans[i].label_start < (size_t) width)
+				{
+				int highlight_len = (int) spans[i].label_len;
+				int highlight_x = x + (int) spans[i].label_start;
+
+				if (highlight_len > width - (int) spans[i].label_start)
+					highlight_len = width - (int) spans[i].label_start;
+				if (highlight_len > 0)
+					mvchgat(y,
+							highlight_x,
+							highlight_len,
+							A_BOLD,
+							state->colors_enabled ? 7 : 0,
+							NULL);
+			}
+			break;
+		}
+		attroff(A_DIM);
+		}
+		else
+		{
+			attron(A_BOLD);
+			mvaddnstr(y, x, line, width);
+			attroff(A_BOLD);
+		}
+	fill_inner_width(y, x + (int) used, width - (int) used);
 }
 
-static void render_station_header_row(int y, int x, int width)
+int airodump_tui_ap_sort_field_from_mouse(const struct airodump_tui_state * state,
+										   int x,
+										   int y)
 {
-	static const char * header =
-		" BSSID              STATION            PWR   Rate    Lost    Frames  Notes  Probes";
-	int used;
+	char line[1024];
+	struct ap_header_span spans[sizeof(ap_header_fields) / sizeof(ap_header_fields[0])];
+	struct airodump_tui_view view = { 0 };
+	size_t used;
+	size_t i;
+	size_t inner_left;
+	size_t inner_right;
 
-	if (width < 1) width = 1;
-	used = (int) strlen(header);
-	if (used > width) used = width;
-	attron(A_BOLD);
-	mvaddnstr(y, x, header, used);
-	fill_inner_width(y, x + used, width - used);
-	attroff(A_BOLD);
+	if (state == NULL) return (SORT_BY_NOTHING);
+	if (y != state->ap_box_top + 1) return (SORT_BY_NOTHING);
+	if (state->ap_box_width < 3) return (SORT_BY_NOTHING);
+	if (x < state->ap_box_left + 1 || x >= state->ap_box_left + state->ap_box_width - 1)
+		return (SORT_BY_NOTHING);
+
+	used = build_ap_header_line(line,
+								sizeof(line),
+								spans,
+								sizeof(spans) / sizeof(spans[0]),
+								&view);
+	(void) used;
+
+	inner_left = (size_t) (state->ap_box_left + 1);
+	inner_right = (size_t) (state->ap_box_left + state->ap_box_width - 1);
+
+	for (i = 0; i < sizeof(spans) / sizeof(spans[0]); i++)
+	{
+		size_t start = inner_left + spans[i].start;
+		size_t end = inner_left + spans[i].end;
+
+		if (spans[i].sort_by == SORT_BY_NOTHING)
+			continue;
+		if ((size_t) x >= start && (size_t) x < end && (size_t) x < inner_right)
+			return (spans[i].sort_by);
+	}
+
+	return (SORT_BY_NOTHING);
 }
 
 static void render_message_style_begin(const struct airodump_tui_state * state,
@@ -589,39 +1007,55 @@ static void render_ap_row(int y,
 						  const struct airodump_tui_view * view)
 {
 	char line[1024];
+	char bssid[32];
+	char power[16];
+	char beacons[16];
+	char data[16];
+	char rate[16];
+	char channel[16];
 	char stas[16];
 	char cipher[32];
 	char auth[32];
 	const char * std;
 	int pair = 0;
+	size_t used = 1;
 
 	security_cipher_string(cipher, sizeof(cipher), ap->security);
 	security_auth_string(auth, sizeof(auth), ap->security);
 	std = security_std_string(ap->security);
 	format_bss_load_station_count(ap, stas, sizeof(stas));
 	pair = power_pair(ap);
-	if (width < 2) width = 2;
-	if (width > (int) sizeof(line) - 1) width = (int) sizeof(line) - 1;
-
-	line[0] = selected ? '>' : ' ';
-	snprintf(line + 1,
-			 sizeof(line) - 1,
-			 " %02X:%02X:%02X:%02X:%02X:%02X  %3d  %8lu  %8lu  %4d  %3d  %5s  %-4s %-7s %-4s ",
+	snprintf(bssid,
+			 sizeof(bssid),
+			 "%02X:%02X:%02X:%02X:%02X:%02X",
 			 ap->bssid[0],
 			 ap->bssid[1],
 			 ap->bssid[2],
 			 ap->bssid[3],
 			 ap->bssid[4],
-			 ap->bssid[5],
-			 ap->avg_power,
-			 ap->nb_bcn,
-			 ap->nb_data,
-			 ap->nb_dataps,
-			 ap->channel,
-			 stas,
-			 std,
-			 cipher,
-			 auth);
+			 ap->bssid[5]);
+	snprintf(power, sizeof(power), "%d", ap->avg_power);
+	snprintf(beacons, sizeof(beacons), "%lu", ap->nb_bcn);
+	snprintf(data, sizeof(data), "%lu", ap->nb_data);
+	snprintf(rate, sizeof(rate), "%d", ap->nb_dataps);
+	snprintf(channel, sizeof(channel), "%d", ap->channel);
+	if (width < 2) width = 2;
+	if (width > (int) sizeof(line) - 1) width = (int) sizeof(line) - 1;
+
+	line[0] = selected ? '>' : ' ';
+	append_ap_core_columns(line,
+						   sizeof(line),
+						   &used,
+						   bssid,
+						   power,
+						   beacons,
+						   data,
+						   rate,
+						   channel,
+						   stas,
+						   std,
+						   cipher,
+						   auth);
 
 	if (view->show_uptime && strlen(line) < sizeof(line) - 32)
 	{
@@ -690,35 +1124,51 @@ static size_t measure_ap_row_width(const struct AP_info * ap,
 								   const struct airodump_tui_view * view)
 {
 	char line[1024];
+	char bssid[32];
+	char power[16];
+	char beacons[16];
+	char data[16];
+	char rate[16];
+	char channel[16];
 	char stas[16];
 	char cipher[32];
 	char auth[32];
 	const char * std;
+	size_t used = 1;
 
 	security_cipher_string(cipher, sizeof(cipher), ap->security);
 	security_auth_string(auth, sizeof(auth), ap->security);
 	std = security_std_string(ap->security);
 	format_bss_load_station_count(ap, stas, sizeof(stas));
-
-	line[0] = selected ? '>' : ' ';
-	snprintf(line + 1,
-			 sizeof(line) - 1,
-			 " %02X:%02X:%02X:%02X:%02X:%02X  %3d  %8lu  %8lu  %4d  %3d  %5s  %-4s %-7s %-4s ",
+	snprintf(bssid,
+			 sizeof(bssid),
+			 "%02X:%02X:%02X:%02X:%02X:%02X",
 			 ap->bssid[0],
 			 ap->bssid[1],
 			 ap->bssid[2],
 			 ap->bssid[3],
 			 ap->bssid[4],
-			 ap->bssid[5],
-			 ap->avg_power,
-			 ap->nb_bcn,
-			 ap->nb_data,
-			 ap->nb_dataps,
-			 ap->channel,
-			 stas,
-			 std,
-			 cipher,
-			 auth);
+			 ap->bssid[5]);
+	snprintf(power, sizeof(power), "%d", ap->avg_power);
+	snprintf(beacons, sizeof(beacons), "%lu", ap->nb_bcn);
+	snprintf(data, sizeof(data), "%lu", ap->nb_data);
+	snprintf(rate, sizeof(rate), "%d", ap->nb_dataps);
+	snprintf(channel, sizeof(channel), "%d", ap->channel);
+
+	line[0] = selected ? '>' : ' ';
+	append_ap_core_columns(line,
+						   sizeof(line),
+						   &used,
+						   bssid,
+						   power,
+						   beacons,
+						   data,
+						   rate,
+						   channel,
+						   stas,
+						   std,
+						   cipher,
+						   auth);
 
 	if (view->show_uptime && strlen(line) < sizeof(line) - 32)
 	{
@@ -770,30 +1220,8 @@ static size_t measure_ap_row_width(const struct AP_info * ap,
 static size_t measure_ap_header_width(const struct airodump_tui_view * view)
 {
 	char line[1024];
-	size_t used = 0;
 
-	line[0] = ' ';
-	used = snprintf(line + 1,
-					sizeof(line) - 1,
-					" %-17s  %3s  %8s  %8s  %4s  %3s  %5s  %-4s %-7s %-4s",
-					"BSSID",
-					"PWR",
-					"Beacons",
-					"#Data",
-					"#/s",
-					"CH",
-					"STAs",
-					"ENC",
-					"CIPHER",
-					"AUTH");
-	if (view->show_uptime && used < sizeof(line) - 1)
-		used += snprintf(line + 1 + used, sizeof(line) - 1 - used, " %14s", "UPTIME");
-	if (view->show_wps && used < sizeof(line) - 1)
-		used += snprintf(line + 1 + used, sizeof(line) - 1 - used, "  %-4s", "WPS");
-	if (view->show_manufacturer && used < sizeof(line) - 1)
-		used += snprintf(line + 1 + used, sizeof(line) - 1 - used, "  %-12s", "MANUFACTURER");
-	if (used < sizeof(line) - 1)
-		used += snprintf(line + 1 + used, sizeof(line) - 1 - used, "  %s", "ESSID");
+	build_ap_header_line(line, sizeof(line), NULL, 0, view);
 
 	return (strlen(line));
 }
@@ -808,6 +1236,7 @@ static void render_station_row(int y,
 	char line[1024];
 	char probes[256];
 	char bssid[32];
+	char last_seen[32];
 	const char * assoc_label = NULL;
 	int i;
 	size_t used = 0;
@@ -841,13 +1270,14 @@ static void render_station_row(int y,
 	{
 		strlcpy(bssid, "(not associated)", sizeof(bssid));
 	}
+	format_station_last_seen(st, last_seen, sizeof(last_seen));
 
 	if (st->base != NULL && memcmp(st->base->bssid, BROADCAST, 6) == 0)
 		assoc_label = "unassociated";
 
 	snprintf(line,
 			 sizeof(line),
-			 " %-17s  %02X:%02X:%02X:%02X:%02X:%02X  %3d  %2d/%-2d  %4d  %8lu  %-5s  %s",
+			 " %-17s  %02X:%02X:%02X:%02X:%02X:%02X  %3d  %2d/%-2d  %4d  %8lu  %11s  %-5s  %s",
 			 bssid,
 			 st->stmac[0],
 			 st->stmac[1],
@@ -860,6 +1290,7 @@ static void render_station_row(int y,
 			 st->rate_from / 1000000,
 			 st->missed,
 			 st->nb_pkt,
+			 last_seen,
 			 (st->wpa.pmkid[0] != 0) ? "PMKID" : (st->wpa.state == 7 ? "EAPOL" : ""),
 			 probes);
 
@@ -870,16 +1301,22 @@ static void render_station_row(int y,
 	}
 
 	line[width] = '\0';
-	if (state->colors_enabled && st->marked)
-		attron(COLOR_PAIR((st->marked_color >= 1 && st->marked_color <= 7)
-							  ? st->marked_color
-							  : 1));
+	if (state->colors_enabled)
+	{
+		int pair = station_color_pair(st);
+
+		if (pair > 0)
+			attron(COLOR_PAIR(pair));
+	}
 	mvaddnstr(y, x, line, width);
 	fill_inner_width(y, x + (int) strlen(line), width - (int) strlen(line));
-	if (state->colors_enabled && st->marked)
-		attroff(COLOR_PAIR((st->marked_color >= 1 && st->marked_color <= 7)
-							   ? st->marked_color
-							   : 1));
+	if (state->colors_enabled)
+	{
+		int pair = station_color_pair(st);
+
+		if (pair > 0)
+			attroff(COLOR_PAIR(pair));
+	}
 }
 
 static void draw_scrollbar(int top,
@@ -1029,7 +1466,7 @@ static void render_header_line(const struct airodump_tui_view * view)
 						 "[ Elapsed: %s ]",
 						 view->elapsed_time);
 	if (view->message != NULL && *view->message != '\0')
-		used += snprintf(line + used, sizeof(line) - used, " %s", view->message);
+		used += snprintf(line + used, sizeof(line) - used, " %s ]", view->message);
 
 	if (COLS < 1) return;
 	if (COLS > (int) sizeof(line)) line[sizeof(line) - 1] = '\0';
@@ -1413,7 +1850,7 @@ void airodump_tui_render(struct airodump_tui_state * state,
 		state->ap_box_width = ap_box_width;
 		state->ap_box_height = ap_height;
 		render_pane_box(ap_box_top, ap_box_left, ap_height, ap_box_width, " Access Points", state->focus == 0);
-		render_ap_header_row(ap_box_top + 1, ap_box_left + 1, ap_box_width - 2, view);
+		render_ap_header_row(ap_box_top + 1, ap_box_left + 1, ap_box_width - 2, state, view);
 		ap_start = (size_t) state->ap_scroll;
 		for (i = 0; i < (size_t) state->ap_visible_rows && ap_start + i < ap_count;
 			 ++i)
@@ -1450,7 +1887,7 @@ void airodump_tui_render(struct airodump_tui_state * state,
 		if (ap_box_width < 24)
 			ap_box_width = 24;
 		render_pane_box(ap_box_top, ap_box_left, ap_height, ap_box_width, " Access Points", state->focus == 0);
-		render_ap_header_row(ap_box_top + 1, ap_box_left + 1, ap_box_width - 2, view);
+		render_ap_header_row(ap_box_top + 1, ap_box_left + 1, ap_box_width - 2, state, view);
 		draw_padded_line(ap_box_top + 2, ap_box_left + 1, ap_box_width - 2, " No APs match the current filters.");
 	}
 
@@ -1571,7 +2008,7 @@ void airodump_tui_render(struct airodump_tui_state * state,
 		state->sta_box_width = sta_box_width;
 		state->sta_box_height = sta_height;
 		render_pane_box(sta_box_top, sta_box_left, sta_height, sta_box_width, header, state->focus == 1);
-		render_station_header_row(body_top, 1, sta_box_width - 2);
+		render_station_header_row(body_top, 1, sta_box_width - 2, state, view);
 
 		st_count = collect_visible_stations(view->st_1st,
 											view,

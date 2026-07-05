@@ -132,6 +132,8 @@ struct AP_info
 	int mfp_required; /* RSN MFP required bit     */
 	int mfp_warned; /* log_sta warning shown    */
 	int beacon_logged; /* We need 1 beacon per AP  */
+	int pmkid_logged; /* PMKID message shown      */
+	int handshake_logged; /* handshake message shown */
 	int dict_started; /* 1 if dict attack started */
 	int ssid_length; /* length of ssid           */
 	float gps_loc_min[5]; /* min gps coordinates      */

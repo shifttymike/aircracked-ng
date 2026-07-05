@@ -3461,26 +3461,29 @@ skip_probe:
 
 		if (z == 24)
 		{
-			if (list_check_decloak(&(ap_cur->packets), caplen, h80211) != 0)
+			if (ap_cur->decloak_detect && (ap_cur->security & STD_WEP) != 0)
 			{
-				list_add_packet(&(ap_cur->packets), caplen, h80211);
-			}
-			else
-			{
-				ap_cur->is_decloak = 1;
-				ap_cur->decloak_detect = 0;
-				list_tail_free(&(ap_cur->packets));
-				memset(lopt.message, '\x00', sizeof(lopt.message));
-				snprintf(lopt.message,
-						 sizeof(lopt.message) - 1,
-						 "][ Decloak: %02X:%02X:%02X:%02X:%02X:%02X ",
-						 ap_cur->bssid[0],
-						 ap_cur->bssid[1],
-						 ap_cur->bssid[2],
-						 ap_cur->bssid[3],
-						 ap_cur->bssid[4],
-						 ap_cur->bssid[5]);
-				append_tui_message_history_now(lopt.message);
+				if (list_check_decloak(&(ap_cur->packets), caplen, h80211) != 0)
+				{
+					list_add_packet(&(ap_cur->packets), caplen, h80211);
+				}
+				else
+				{
+					ap_cur->is_decloak = 1;
+					ap_cur->decloak_detect = 0;
+					list_tail_free(&(ap_cur->packets));
+					memset(lopt.message, '\x00', sizeof(lopt.message));
+					snprintf(lopt.message,
+							 sizeof(lopt.message) - 1,
+							 "][ Decloak: %02X:%02X:%02X:%02X:%02X:%02X ",
+							 ap_cur->bssid[0],
+							 ap_cur->bssid[1],
+							 ap_cur->bssid[2],
+							 ap_cur->bssid[3],
+							 ap_cur->bssid[4],
+							 ap_cur->bssid[5]);
+					append_tui_message_history_now(lopt.message);
+				}
 			}
 		}
 
@@ -3718,19 +3721,23 @@ skip_probe:
 							st_cur->wpa.keyver = (uint8_t)(h80211[z + 6] & 7);
 
 							memcpy(st_cur->wpa.stmac, st_cur->stmac, 6);
-							memcpy(lopt.wpa_bssid, ap_cur->bssid, 6);
-							memset(lopt.message, '\x00', sizeof(lopt.message));
-							snprintf(lopt.message,
-									sizeof(lopt.message) - 1,
-									"][ PMKID found: "
-									"%02X:%02X:%02X:%02X:%02X:%02X ",
-									lopt.wpa_bssid[0],
-									lopt.wpa_bssid[1],
-									lopt.wpa_bssid[2],
-									lopt.wpa_bssid[3],
-									lopt.wpa_bssid[4],
-									lopt.wpa_bssid[5]);
-							append_tui_message_history_now(lopt.message);
+							if (!ap_cur->pmkid_logged)
+							{
+								ap_cur->pmkid_logged = 1;
+								memcpy(lopt.wpa_bssid, ap_cur->bssid, 6);
+								memset(lopt.message, '\x00', sizeof(lopt.message));
+								snprintf(lopt.message,
+										sizeof(lopt.message) - 1,
+										"][ PMKID found: "
+										"%02X:%02X:%02X:%02X:%02X:%02X ",
+										lopt.wpa_bssid[0],
+										lopt.wpa_bssid[1],
+										lopt.wpa_bssid[2],
+										lopt.wpa_bssid[3],
+										lopt.wpa_bssid[4],
+										lopt.wpa_bssid[5]);
+								append_tui_message_history_now(lopt.message);
+							}
 
 							goto write_packet;
 						}
@@ -3811,8 +3818,10 @@ skip_probe:
 				}
 			}
 
-			if (st_cur->wpa.state == 7 && !is_filtered_essid(ap_cur->essid))
+			if (st_cur->wpa.state == 7 && !is_filtered_essid(ap_cur->essid)
+				&& !ap_cur->handshake_logged)
 			{
+				ap_cur->handshake_logged = 1;
 				memcpy(st_cur->wpa.stmac, st_cur->stmac, 6);
 				memcpy(lopt.wpa_bssid, ap_cur->bssid, 6);
 				memset(lopt.message, '\x00', sizeof(lopt.message));
@@ -4845,39 +4854,6 @@ static void set_selected_ap(struct AP_info * ap, int selection_direction)
 		memset(lopt.selected_bssid, '\x00', 6);
 }
 
-static const char * sort_field_name(int sort_by)
-{
-	switch (sort_by)
-	{
-		case SORT_BY_NOTHING:
-			return ("first seen");
-		case SORT_BY_BSSID:
-			return ("bssid");
-		case SORT_BY_POWER:
-			return ("power level");
-		case SORT_BY_BEACON:
-			return ("beacon number");
-		case SORT_BY_DATA:
-			return ("number of data packets");
-		case SORT_BY_PRATE:
-			return ("packet rate");
-		case SORT_BY_CHAN:
-			return ("channel");
-		case SORT_BY_MBIT:
-			return ("max data rate");
-		case SORT_BY_ENC:
-			return ("encryption");
-		case SORT_BY_CIPHER:
-			return ("cipher");
-		case SORT_BY_AUTH:
-			return ("authentication");
-		case SORT_BY_ESSID:
-			return ("ESSID");
-		default:
-			return ("power level");
-	}
-}
-
 static const char * station_sort_field_name(int sort_by)
 {
 	switch (sort_by)
@@ -4900,6 +4876,8 @@ static const char * station_sort_field_name(int sort_by)
 			return ("notes");
 		case STA_SORT_BY_PROBES:
 			return ("probes");
+		case STA_SORT_BY_LAST_SEEN:
+			return ("last seen");
 		default:
 			return ("first seen");
 	}
@@ -5236,6 +5214,7 @@ static int handle_mouse_event(void)
 	struct AP_info * ap_hit;
 	int target_focus;
 	int redraw = 0;
+	int sort_by;
 
 	if (!use_ncurses_tui) return (0);
 	if (getmouse(&event) != OK) return (0);
@@ -5296,6 +5275,37 @@ static int handle_mouse_event(void)
 		== 0)
 	{
 		return (0);
+	}
+
+	{
+		sort_by = airodump_tui_station_sort_field_from_mouse(&tui_state, event.x, event.y);
+
+		if (sort_by != STA_SORT_BY_NOTHING)
+		{
+			tui_state.sta_sort_by = sort_by;
+			set_tui_focus(1);
+			redraw = 1;
+			return (redraw);
+		}
+	}
+
+	sort_by = airodump_tui_ap_sort_field_from_mouse(&tui_state, event.x, event.y);
+	if (sort_by != SORT_BY_NOTHING)
+	{
+		lopt.sort_by = sort_by;
+		lopt.sort_inv *= -1;
+		if (lopt.sort_inv < 0) lopt.sort_inv = -1;
+		else lopt.sort_inv = 1;
+		ALLEGE(pthread_mutex_lock(&(lopt.mx_sort)) == 0);
+		dump_sort();
+		ALLEGE(pthread_mutex_unlock(&(lopt.mx_sort)) == 0);
+		set_tui_focus(0);
+		return (1);
+	}
+
+	if (target_focus == 1)
+	{
+		set_tui_focus(1);
 	}
 
 	ap_hit = pick_ap_from_mouse(event.x, event.y);
@@ -5469,10 +5479,6 @@ static int handle_keycode(int keycode)
 			lopt.sort_by++;
 
 			if (lopt.sort_by > MAX_SORT) lopt.sort_by = 0;
-			snprintf(lopt.message,
-					 sizeof(lopt.message),
-					 "][ sorting APs by %s",
-					 sort_field_name(lopt.sort_by));
 			ALLEGE(pthread_mutex_lock(&(lopt.mx_sort)) == 0);
 			dump_sort();
 			ALLEGE(pthread_mutex_unlock(&(lopt.mx_sort)) == 0);
