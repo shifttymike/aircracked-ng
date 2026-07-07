@@ -128,6 +128,24 @@ static char * format_text_for_csv(const unsigned char * input, size_t len)
 	return (rret) ? (rret) : (ret);
 }
 
+static const char * security_std_label(unsigned int security)
+{
+	if (security & STD_WPA2)
+	{
+		if ((security & AUTH_SAE) && (security & AUTH_PSK))
+			return ("WPA2/3");
+		if (security & AUTH_SAE)
+			return ("WPA3");
+		if (security & AUTH_OWE)
+			return ("OWE");
+		return ("WPA2");
+	}
+	if (security & STD_WPA) return ("WPA");
+	if (security & STD_WEP) return ("WEP");
+	if (security & STD_OPN) return ("OPN");
+	return ("");
+}
+
 int dump_write_csv(struct AP_info * ap_1st,
 				   struct ST_info * st_1st,
 				   unsigned int f_encrypt)
@@ -210,17 +228,7 @@ int dump_write_csv(struct AP_info * ap_1st,
 			== 0)
 			fprintf(opt.f_txt, " ");
 		else
-		{
-			if (ap_cur->security & STD_WPA2)
-			{
-				if (ap_cur->security & AUTH_SAE || ap_cur->security & AUTH_OWE)
-					fprintf(opt.f_txt, " WPA3");
-				fprintf(opt.f_txt, " WPA2");
-			}
-			if (ap_cur->security & STD_WPA) fprintf(opt.f_txt, " WPA");
-			if (ap_cur->security & STD_WEP) fprintf(opt.f_txt, " WEP");
-			if (ap_cur->security & STD_OPN) fprintf(opt.f_txt, " OPN");
-		}
+			fprintf(opt.f_txt, " %s", security_std_label(ap_cur->security));
 
 		fprintf(opt.f_txt, ",");
 
@@ -1451,18 +1459,7 @@ int dump_write_kismet_csv(struct AP_info * ap_1st,
 
 		// Encryption
 		if ((ap_cur->security & (STD_OPN | STD_WEP | STD_WPA | STD_WPA2)) != 0)
-		{
-			if (ap_cur->security & STD_WPA2)
-			{
-				if (ap_cur->security & AUTH_SAE || ap_cur->security & AUTH_OWE)
-					fprintf(opt.f_kis, "WPA3,");
-				else
-					fprintf(opt.f_kis, "WPA2,");
-			}
-			if (ap_cur->security & STD_WPA) fprintf(opt.f_kis, "WPA,");
-			if (ap_cur->security & STD_WEP) fprintf(opt.f_kis, "WEP,");
-			if (ap_cur->security & STD_OPN) fprintf(opt.f_kis, "OPN,");
-		}
+			fprintf(opt.f_kis, "%s,", security_std_label(ap_cur->security));
 
 		if ((ap_cur->security & ENC_FIELD) == 0)
 			fprintf(opt.f_kis, "None,");
@@ -1588,6 +1585,98 @@ int dump_write_kismet_csv(struct AP_info * ap_1st,
 	}
 
 	fflush(opt.f_kis);
+
+	return (0);
+}
+
+int dump_write_wpa_snapshot(const char * filename,
+							struct ST_info * st_1st,
+							size_t * records_written)
+{
+	FILE * fp;
+	struct ivs2_filehdr fivs2;
+	struct ivs2_pkthdr ivs2;
+	struct ST_info * st_cur;
+	uint8_t zero_pmkid[sizeof(st_cur->wpa.pmkid)];
+	size_t records = 0;
+
+	if (filename == NULL || filename[0] == '\0' || st_1st == NULL)
+		return (0);
+
+	if (records_written != NULL) *records_written = 0;
+
+	fp = fopen(filename, "wb+");
+	if (fp == NULL)
+	{
+		perror("fopen failed");
+		return (1);
+	}
+
+	memset(&fivs2, '\x00', sizeof(fivs2));
+	fivs2.version = IVS2_VERSION;
+
+	if (fwrite(IVS2_MAGIC, 1, 4, fp) != (size_t) 4)
+	{
+		perror("fwrite(IVS magic) failed");
+		fclose(fp);
+		return (1);
+	}
+
+	if (fwrite(&fivs2, 1, sizeof(fivs2), fp) != (size_t) sizeof(fivs2))
+	{
+		perror("fwrite(IVS header) failed");
+		fclose(fp);
+		return (1);
+	}
+
+	memset(zero_pmkid, 0, sizeof(zero_pmkid));
+
+	for (st_cur = st_1st; st_cur != NULL; st_cur = st_cur->next)
+	{
+		if (st_cur->base == NULL) continue;
+		if (st_cur->wpa.state != 7
+			&& memcmp(st_cur->wpa.pmkid, zero_pmkid, sizeof(zero_pmkid)) == 0)
+			continue;
+
+		memset(&ivs2, '\x00', sizeof(ivs2));
+		ivs2.flags = IVS2_WPA | IVS2_BSSID;
+		ivs2.len = (uint16_t) (sizeof(struct WPA_hdsk) + 6);
+
+		if (fwrite(&ivs2, 1, sizeof(ivs2), fp) != (size_t) sizeof(ivs2))
+		{
+			perror("fwrite(IVS WPA header) failed");
+			fclose(fp);
+			return (1);
+		}
+
+		if (fwrite(st_cur->base->bssid, 1, 6, fp) != (size_t) 6)
+		{
+			perror("fwrite(IVS WPA bssid) failed");
+			fclose(fp);
+			return (1);
+		}
+
+		if (fwrite(&(st_cur->wpa),
+				   1,
+				   sizeof(struct WPA_hdsk),
+				   fp)
+			!= (size_t) sizeof(struct WPA_hdsk))
+		{
+			perror("fwrite(IVS WPA payload) failed");
+			fclose(fp);
+			return (1);
+		}
+
+		records++;
+	}
+
+	fflush(fp);
+	fclose(fp);
+
+	if (records_written != NULL) *records_written = records;
+
+	if (records == 0)
+		unlink(filename);
 
 	return (0);
 }

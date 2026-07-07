@@ -27,6 +27,9 @@ extern int is_filtered_essid(const uint8_t * essid);
 
 #ifdef HAVE_NCURSES
 static long long station_age_seconds(const struct ST_info * st);
+static int station_is_locally_administered(const struct ST_info * st);
+static int station_band_value(const struct ST_info * st);
+static const char * band_label_from_value(int band, int channel);
 static void fill_inner_width(int y, int x, int width);
 static void append_padded_column(char * line,
 								 size_t line_size,
@@ -35,6 +38,8 @@ static void append_padded_column(char * line,
 								 int width,
 								 int right_align,
 								 int separator_spaces);
+static void append_linef(char * line, size_t line_size, size_t * used, const char * fmt, ...);
+static void format_header_message(char * out, size_t out_len, const char * message);
 
 static void apply_mouse_mask(struct airodump_tui_state * state)
 {
@@ -42,7 +47,7 @@ static void apply_mouse_mask(struct airodump_tui_state * state)
 
 	if (state->mouse_enabled)
 	{
-		mousemask(BUTTON1_CLICKED | BUTTON1_DOUBLE_CLICKED | BUTTON2_CLICKED
+		mousemask(BUTTON1_PRESSED | BUTTON1_CLICKED | BUTTON1_DOUBLE_CLICKED | BUTTON2_CLICKED
 					  | BUTTON4_CLICKED | BUTTON5_CLICKED,
 				  NULL);
 	}
@@ -52,8 +57,24 @@ static void apply_mouse_mask(struct airodump_tui_state * state)
 	}
 }
 
+enum station_header_column
+{
+	STATION_HEADER_BSSID = 0,
+	STATION_HEADER_BAND,
+	STATION_HEADER_STATION,
+	STATION_HEADER_LA,
+	STATION_HEADER_POWER,
+	STATION_HEADER_RATE,
+	STATION_HEADER_LOST,
+	STATION_HEADER_FRAMES,
+	STATION_HEADER_LAST_SEEN,
+	STATION_HEADER_NOTES,
+	STATION_HEADER_PROBES
+};
+
 struct station_header_field
 {
+	enum station_header_column column;
 	int sort_by;
 	const char * label;
 	int width;
@@ -95,10 +116,11 @@ static const struct ap_header_field ap_header_fields[] = {
 	{ SORT_BY_DATA, "#Data", 8, 1, 2 },
 	{ SORT_BY_PRATE, "#/s", 4, 1, 2 },
 	{ SORT_BY_CHAN, "CH", 3, 1, 2 },
-	{ -1, "STAs", 4, 1, 2 },
-	{ SORT_BY_ENC, "ENC", 4, 0, 1 },
+	{ -1, "Band", 4, 0, 2 },
+	{ SORT_BY_STAS, "STAs", 4, 1, 2 },
+	{ SORT_BY_ENC, "ENC", 6, 0, 1 },
 	{ SORT_BY_CIPHER, "CIPHER", 7, 0, 1 },
-	{ SORT_BY_AUTH, "AUTH", 4, 0, 1 },
+	{ SORT_BY_AUTH, "AUTH", 7, 0, 1 },
 	{ SORT_BY_ESSID, "ESSID", 0, 0, 2 },
 };
 
@@ -152,23 +174,23 @@ static size_t build_ap_header_line(char * line,
 		append_padded_column(line, line_size, &used, "WPS", 4, 0, 2);
 	if (view->show_manufacturer && used < line_size - 1)
 		append_padded_column(line, line_size, &used, "MANUFACTURER", 12, 0, 2);
-	if (used < line_size - 1)
-		append_padded_column(line, line_size, &used, "ESSID", 0, 0, 2);
 
 	line[used] = '\0';
 	return (used);
 }
 
 static const struct station_header_field station_header_fields[] = {
-	{ STA_SORT_BY_BSSID, "BSSID", 17, 0, 1 },
-	{ STA_SORT_BY_STATION, "STATION", 17, 0, 2 },
-	{ STA_SORT_BY_POWER, "PWR", 3, 1, 2 },
-	{ STA_SORT_BY_RATE, "Rate", 4, 0, 2 },
-	{ STA_SORT_BY_LOST, "Lost", 4, 0, 2 },
-	{ STA_SORT_BY_FRAMES, "Frames", 6, 0, 2 },
-	{ STA_SORT_BY_LAST_SEEN, "Last seen", 9, 0, 2 },
-	{ STA_SORT_BY_NOTES, "Notes", 5, 0, 2 },
-	{ STA_SORT_BY_PROBES, "Probes", 6, 0, 2 },
+	{ STATION_HEADER_BSSID, STA_SORT_BY_BSSID, "BSSID", 17, 0, 1 },
+	{ STATION_HEADER_STATION, STA_SORT_BY_STATION, "STATION", 17, 0, 2 },
+	{ STATION_HEADER_BAND, STA_SORT_BY_BAND, "Band", 4, 0, 2 },
+	{ STATION_HEADER_LA, STA_SORT_BY_LA, "LA", 2, 0, 2 },
+	{ STATION_HEADER_POWER, STA_SORT_BY_POWER, "PWR", 3, 1, 2 },
+	{ STATION_HEADER_RATE, STA_SORT_BY_RATE, "Rate", 7, 0, 2 },
+	{ STATION_HEADER_LOST, STA_SORT_BY_LOST, "Lost", 4, 0, 2 },
+	{ STATION_HEADER_FRAMES, STA_SORT_BY_FRAMES, "Frames", 8, 0, 2 },
+	{ STATION_HEADER_LAST_SEEN, STA_SORT_BY_LAST_SEEN, "Last seen", 11, 0, 2 },
+	{ STATION_HEADER_NOTES, STA_SORT_BY_NOTES, "Notes", 5, 0, 2 },
+	{ STATION_HEADER_PROBES, STA_SORT_BY_PROBES, "Probes", 6, 0, 2 },
 };
 
 static size_t station_header_label_offset(const struct station_header_field * field)
@@ -192,6 +214,7 @@ static size_t build_station_header_line(char * line,
 										size_t span_count,
 										const struct airodump_tui_view * view)
 {
+	(void) view;
 	size_t used = 1;
 	size_t i;
 
@@ -215,14 +238,6 @@ static size_t build_station_header_line(char * line,
 		if (spans != NULL && i < span_count)
 			spans[i].end = used;
 	}
-	if (view->show_uptime && used < line_size - 1)
-		append_padded_column(line, line_size, &used, "UPTIME", 14, 0, 1);
-	if (view->show_wps && used < line_size - 1)
-		append_padded_column(line, line_size, &used, "WPS", 4, 0, 2);
-	if (view->show_manufacturer && used < line_size - 1)
-		append_padded_column(line, line_size, &used, "MANUFACTURER", 12, 0, 2);
-	if (used < line_size - 1)
-		append_padded_column(line, line_size, &used, "ESSID", 0, 0, 2);
 
 	line[used] = '\0';
 	return (used);
@@ -487,6 +502,13 @@ static size_t collect_visible_stations(struct ST_info * st_1st,
 					case STA_SORT_BY_STATION:
 						cmp = memcmp(lhs->stmac, rhs->stmac, 6);
 						break;
+					case STA_SORT_BY_BAND:
+						cmp = station_band_value(lhs) - station_band_value(rhs);
+						break;
+					case STA_SORT_BY_LA:
+						cmp = station_is_locally_administered(lhs)
+							  - station_is_locally_administered(rhs);
+						break;
 					case STA_SORT_BY_POWER:
 						cmp = lhs->power - rhs->power;
 						break;
@@ -557,18 +579,30 @@ static size_t collect_visible_stations(struct ST_info * st_1st,
 	return (count);
 }
 
-static const char * security_std_string(unsigned int security)
+static void security_std_string(char * out, size_t len, unsigned int security)
 {
+	if (out == NULL || len == 0) return;
+
 	if (security & STD_WPA2)
 	{
-		if (security & AUTH_SAE) return ("WPA3");
-		if (security & AUTH_OWE) return ("WPA3");
-		return ("WPA2");
+		if ((security & AUTH_SAE) && (security & AUTH_PSK))
+			strlcpy(out, "WPA2/3", len);
+		else if (security & AUTH_SAE)
+			strlcpy(out, "WPA3", len);
+		else if (security & AUTH_OWE)
+			strlcpy(out, "OWE", len);
+		else
+			strlcpy(out, "WPA2", len);
+		return;
 	}
-	if (security & STD_WPA) return ("WPA");
-	if (security & STD_WEP) return ("WEP");
-	if (security & STD_OPN) return ("OPN");
-	return ("");
+	if (security & STD_WPA)
+		strlcpy(out, "WPA", len);
+	else if (security & STD_WEP)
+		strlcpy(out, "WEP", len);
+	else if (security & STD_OPN)
+		strlcpy(out, "OPN", len);
+	else
+		strlcpy(out, "", len);
 }
 
 static void security_cipher_string(char * out, size_t len, unsigned int security)
@@ -607,7 +641,9 @@ static void security_auth_string(char * out, size_t len, unsigned int security)
 		return;
 	}
 
-	if (security & AUTH_SAE)
+	if ((security & AUTH_SAE) && (security & AUTH_PSK))
+		strlcpy(out, "PSK+SAE", len);
+	else if (security & AUTH_SAE)
 		strlcpy(out, "SAE", len);
 	else if (security & AUTH_MGT)
 		strlcpy(out, "MGT", len);
@@ -636,6 +672,15 @@ static int power_pair(const struct AP_info * ap)
 	return (5);
 }
 
+static char ap_row_marker(const struct AP_info * ap, int selected)
+{
+	if (selected)
+		return ('>');
+	if (ap != NULL && (ap->handshake_logged || ap->pmkid_logged))
+		return ('*');
+	return (' ');
+}
+
 static int station_color_pair(const struct ST_info * st)
 {
 	if (st == NULL) return (0);
@@ -644,6 +689,39 @@ static int station_color_pair(const struct ST_info * st)
 	if ((st->stmac[0] & 0x02) != 0)
 		return (6);
 	return (0);
+}
+
+static int station_is_locally_administered(const struct ST_info * st)
+{
+	if (st == NULL) return (0);
+	return (((st->stmac[0] & 0x02) != 0) ? 1 : 0);
+}
+
+static int station_band_value(const struct ST_info * st)
+{
+	if (st == NULL) return (-1);
+	if (st->band != 0) return (st->band);
+	if (st->base != NULL) return (st->base->band);
+	return (-1);
+}
+
+static const char * band_label_from_value(int band, int channel)
+{
+	switch (band)
+	{
+		case 24:
+			return ("2.4");
+		case 5:
+			return ("5");
+		case 6:
+			return ("6");
+		default:
+			if (channel > 14)
+				return ("5");
+			if (channel > 0)
+				return ("2.4");
+			return ("?");
+	}
 }
 
 static long long station_age_seconds(const struct ST_info * st)
@@ -722,6 +800,61 @@ static void append_padded_column(char * line,
 	line[*used] = '\0';
 }
 
+static void append_linef(char * line, size_t line_size, size_t * used, const char * fmt, ...)
+{
+	va_list args;
+	int written;
+
+	if (line == NULL || used == NULL || fmt == NULL || line_size == 0)
+		return;
+	if (*used >= line_size - 1)
+	{
+		line[line_size - 1] = '\0';
+		return;
+	}
+
+	va_start(args, fmt);
+	written = vsnprintf(line + *used, line_size - *used, fmt, args);
+	va_end(args);
+
+	if (written < 0)
+		return;
+	if ((size_t) written >= line_size - *used)
+		*used = line_size - 1;
+	else
+		*used += (size_t) written;
+}
+
+static void format_header_message(char * out, size_t out_len, const char * message)
+{
+	const char * p;
+	size_t used = 0;
+
+	if (out == NULL || out_len == 0) return;
+	out[0] = '\0';
+	if (message == NULL) return;
+
+	p = message;
+	while (isspace((unsigned char) *p))
+		p++;
+	if (p[0] == ']' && p[1] == '[')
+		p += 2;
+	while (isspace((unsigned char) *p))
+		p++;
+
+	while (*p != '\0' && used + 1 < out_len)
+	{
+		unsigned char ch = (unsigned char) *p++;
+
+		if (ch == '\r' || ch == '\n' || ch == '\t')
+			ch = ' ';
+		if (iscntrl(ch))
+			continue;
+		out[used++] = (char) ch;
+	}
+	out[used] = '\0';
+}
+
 static void append_ap_core_columns(char * line,
 								   size_t line_size,
 								   size_t * used,
@@ -731,6 +864,7 @@ static void append_ap_core_columns(char * line,
 								   const char * data,
 								   const char * rate,
 								   const char * channel,
+								   const char * band,
 								   const char * stas,
 								   const char * std,
 								   const char * cipher,
@@ -742,10 +876,11 @@ static void append_ap_core_columns(char * line,
 	append_padded_column(line, line_size, used, data, 8, 1, 2);
 	append_padded_column(line, line_size, used, rate, 4, 1, 2);
 	append_padded_column(line, line_size, used, channel, 3, 1, 2);
+	append_padded_column(line, line_size, used, band, 4, 0, 2);
 	append_padded_column(line, line_size, used, stas, 4, 1, 2);
-	append_padded_column(line, line_size, used, std, 4, 0, 1);
+	append_padded_column(line, line_size, used, std, 6, 0, 1);
 	append_padded_column(line, line_size, used, cipher, 7, 0, 1);
-	append_padded_column(line, line_size, used, auth, 4, 0, 1);
+	append_padded_column(line, line_size, used, auth, 7, 0, 1);
 }
 
 static void render_ap_header_row(int y,
@@ -1013,16 +1148,17 @@ static void render_ap_row(int y,
 	char data[16];
 	char rate[16];
 	char channel[16];
+	const char * band;
 	char stas[16];
 	char cipher[32];
 	char auth[32];
-	const char * std;
+	char std[16];
 	int pair = 0;
 	size_t used = 1;
 
 	security_cipher_string(cipher, sizeof(cipher), ap->security);
 	security_auth_string(auth, sizeof(auth), ap->security);
-	std = security_std_string(ap->security);
+	security_std_string(std, sizeof(std), ap->security);
 	format_bss_load_station_count(ap, stas, sizeof(stas));
 	pair = power_pair(ap);
 	snprintf(bssid,
@@ -1039,10 +1175,11 @@ static void render_ap_row(int y,
 	snprintf(data, sizeof(data), "%lu", ap->nb_data);
 	snprintf(rate, sizeof(rate), "%d", ap->nb_dataps);
 	snprintf(channel, sizeof(channel), "%d", ap->channel);
+	band = band_label_from_value(ap->band, ap->channel);
 	if (width < 2) width = 2;
 	if (width > (int) sizeof(line) - 1) width = (int) sizeof(line) - 1;
 
-	line[0] = selected ? '>' : ' ';
+	line[0] = ap_row_marker(ap, selected);
 	append_ap_core_columns(line,
 						   sizeof(line),
 						   &used,
@@ -1052,6 +1189,7 @@ static void render_ap_row(int y,
 						   data,
 						   rate,
 						   channel,
+						   band,
 						   stas,
 						   std,
 						   cipher,
@@ -1087,17 +1225,17 @@ static void render_ap_row(int y,
 	if (ap->essid[0] != 0x00 && strlen(line) < sizeof(line) - 4)
 	{
 		size_t used = strlen(line);
-		snprintf(line + used, sizeof(line) - used, " %s", ap->essid);
+		snprintf(line + used, sizeof(line) - used, "  %s", ap->essid);
 	}
 	else if (memcmp(ap->bssid, BROADCAST, 6) == 0 && strlen(line) < sizeof(line) - 24)
 	{
 		size_t used = strlen(line);
-		snprintf(line + used, sizeof(line) - used, " (unassociated clients)");
+		snprintf(line + used, sizeof(line) - used, "  (unassociated clients)");
 	}
 	else if (strlen(line) < sizeof(line) - 16)
 	{
 		size_t used = strlen(line);
-		snprintf(line + used, sizeof(line) - used, " <length:%d>",
+		snprintf(line + used, sizeof(line) - used, "  <length:%d>",
 				 ap->ssid_length);
 	}
 
@@ -1130,15 +1268,16 @@ static size_t measure_ap_row_width(const struct AP_info * ap,
 	char data[16];
 	char rate[16];
 	char channel[16];
+	const char * band;
 	char stas[16];
 	char cipher[32];
 	char auth[32];
-	const char * std;
+	char std[16];
 	size_t used = 1;
 
 	security_cipher_string(cipher, sizeof(cipher), ap->security);
 	security_auth_string(auth, sizeof(auth), ap->security);
-	std = security_std_string(ap->security);
+	security_std_string(std, sizeof(std), ap->security);
 	format_bss_load_station_count(ap, stas, sizeof(stas));
 	snprintf(bssid,
 			 sizeof(bssid),
@@ -1154,8 +1293,9 @@ static size_t measure_ap_row_width(const struct AP_info * ap,
 	snprintf(data, sizeof(data), "%lu", ap->nb_data);
 	snprintf(rate, sizeof(rate), "%d", ap->nb_dataps);
 	snprintf(channel, sizeof(channel), "%d", ap->channel);
+	band = band_label_from_value(ap->band, ap->channel);
 
-	line[0] = selected ? '>' : ' ';
+	line[0] = ap_row_marker(ap, selected);
 	append_ap_core_columns(line,
 						   sizeof(line),
 						   &used,
@@ -1165,6 +1305,7 @@ static size_t measure_ap_row_width(const struct AP_info * ap,
 						   data,
 						   rate,
 						   channel,
+						   band,
 						   stas,
 						   std,
 						   cipher,
@@ -1200,17 +1341,17 @@ static size_t measure_ap_row_width(const struct AP_info * ap,
 	if (ap->essid[0] != 0x00 && strlen(line) < sizeof(line) - 4)
 	{
 		size_t used = strlen(line);
-		snprintf(line + used, sizeof(line) - used, " %s", ap->essid);
+		snprintf(line + used, sizeof(line) - used, "  %s", ap->essid);
 	}
 	else if (memcmp(ap->bssid, BROADCAST, 6) == 0 && strlen(line) < sizeof(line) - 24)
 	{
 		size_t used = strlen(line);
-		snprintf(line + used, sizeof(line) - used, " (unassociated clients)");
+		snprintf(line + used, sizeof(line) - used, "  (unassociated clients)");
 	}
 	else if (strlen(line) < sizeof(line) - 16)
 	{
 		size_t used = strlen(line);
-		snprintf(line + used, sizeof(line) - used, " <length:%d>",
+		snprintf(line + used, sizeof(line) - used, "  <length:%d>",
 				 ap->ssid_length);
 	}
 
@@ -1226,6 +1367,22 @@ static size_t measure_ap_header_width(const struct airodump_tui_view * view)
 	return (strlen(line));
 }
 
+static int compute_ap_box_width(size_t ap_width, int cols, int msg_enabled, int needs_scrollbar)
+{
+	int ap_box_width;
+
+	if (ap_width + 4 > (size_t) cols)
+		ap_width = (cols > 4) ? (size_t) cols - 4 : 1;
+	ap_box_width = (int) ap_width + 4;
+	if (needs_scrollbar)
+		ap_box_width++;
+	if (msg_enabled && cols - ap_box_width < 24)
+		ap_box_width = cols - 24;
+	if (ap_box_width < 24)
+		ap_box_width = 24;
+	return (ap_box_width);
+}
+
 static void render_station_row(int y,
 							   int x,
 							   int width,
@@ -1234,22 +1391,36 @@ static void render_station_row(int y,
 							   const struct airodump_tui_view * view)
 {
 	char line[1024];
-	char probes[256];
 	char bssid[32];
+	const char * band;
+	char station[32];
+	char power[16];
+	char rate[32];
+	char lost[16];
+	char frames[16];
 	char last_seen[32];
+	char notes[16];
+	char probes[256];
 	const char * assoc_label = NULL;
-	int i;
+	const char * la_label = NULL;
+	const char * cell_text;
 	size_t used = 0;
+	size_t probes_used = 0;
+	int station_band;
+	int station_channel;
+	int i;
 
 	probes[0] = '\0';
 	for (i = 0; i < NB_PRB; i++)
 	{
 		if (st->probes[i][0] == '\0') continue;
-		if (used >= sizeof(probes) - 4) break;
-		snprintf(probes + used, sizeof(probes) - used, "%s%s",
-				 (used > 0) ? "," : "",
+		if (probes_used >= sizeof(probes) - 4) break;
+		snprintf(probes + probes_used,
+				 sizeof(probes) - probes_used,
+				 "%s%s",
+				 (probes_used > 0) ? "," : "",
 				 st->probes[i]);
-		used = strlen(probes);
+		probes_used = strlen(probes);
 	}
 	if (width < 1) width = 1;
 	if (width > (int) sizeof(line) - 1) width = (int) sizeof(line) - 1;
@@ -1270,34 +1441,99 @@ static void render_station_row(int y,
 	{
 		strlcpy(bssid, "(not associated)", sizeof(bssid));
 	}
-	format_station_last_seen(st, last_seen, sizeof(last_seen));
-
-	if (st->base != NULL && memcmp(st->base->bssid, BROADCAST, 6) == 0)
-		assoc_label = "unassociated";
-
-	snprintf(line,
-			 sizeof(line),
-			 " %-17s  %02X:%02X:%02X:%02X:%02X:%02X  %3d  %2d/%-2d  %4d  %8lu  %11s  %-5s  %s",
-			 bssid,
+	snprintf(station,
+			 sizeof(station),
+			 "%02X:%02X:%02X:%02X:%02X:%02X",
 			 st->stmac[0],
 			 st->stmac[1],
 			 st->stmac[2],
 			 st->stmac[3],
 			 st->stmac[4],
-			 st->stmac[5],
-			 st->power,
-			 st->rate_to / 1000000,
-			 st->rate_from / 1000000,
-			 st->missed,
-			 st->nb_pkt,
-			 last_seen,
-			 (st->wpa.pmkid[0] != 0) ? "PMKID" : (st->wpa.state == 7 ? "EAPOL" : ""),
-			 probes);
-
-	if (assoc_label != NULL && strlen(line) < sizeof(line) - 24)
+			 st->stmac[5]);
+	format_station_last_seen(st, last_seen, sizeof(last_seen));
+	station_band = st->band;
+	station_channel = st->channel;
+	if (station_band == 0 && st->base != NULL)
 	{
-		size_t line_used = strlen(line);
-		snprintf(line + line_used, sizeof(line) - line_used, " [%s]", assoc_label);
+		station_band = st->base->band;
+		station_channel = st->base->channel;
+	}
+	band = band_label_from_value(station_band, station_channel);
+
+	if (st->base != NULL && memcmp(st->base->bssid, BROADCAST, 6) == 0)
+		assoc_label = "unassociated";
+	if (station_is_locally_administered(st))
+		la_label = "LA";
+
+	snprintf(power, sizeof(power), "%d", st->power);
+	snprintf(rate,
+			 sizeof(rate),
+			 "%2d/%-2d",
+			 st->rate_to / 1000000,
+			 st->rate_from / 1000000);
+	snprintf(lost, sizeof(lost), "%d", st->missed);
+	snprintf(frames, sizeof(frames), "%lu", st->nb_pkt);
+	strlcpy(notes,
+			(st->wpa.pmkid[0] != 0) ? "PMKID" : (st->wpa.state == 7 ? "EAPOL" : ""),
+			sizeof(notes));
+
+	line[0] = ' ';
+	line[1] = '\0';
+	used = 1;
+	for (i = 0; i < (int) (sizeof(station_header_fields) / sizeof(station_header_fields[0])); i++)
+	{
+		switch (station_header_fields[i].column)
+		{
+			case STATION_HEADER_BSSID:
+				cell_text = bssid;
+				break;
+			case STATION_HEADER_BAND:
+				cell_text = band;
+				break;
+			case STATION_HEADER_STATION:
+				cell_text = station;
+				break;
+			case STATION_HEADER_LA:
+				cell_text = la_label != NULL ? la_label : "";
+				break;
+			case STATION_HEADER_POWER:
+				cell_text = power;
+				break;
+			case STATION_HEADER_RATE:
+				cell_text = rate;
+				break;
+			case STATION_HEADER_LOST:
+				cell_text = lost;
+				break;
+			case STATION_HEADER_FRAMES:
+				cell_text = frames;
+				break;
+			case STATION_HEADER_LAST_SEEN:
+				cell_text = last_seen;
+				break;
+			case STATION_HEADER_NOTES:
+				cell_text = notes;
+				break;
+			case STATION_HEADER_PROBES:
+				cell_text = probes;
+				break;
+			default:
+				cell_text = "";
+				break;
+		}
+		append_padded_column(line,
+							 sizeof(line),
+							 &used,
+							 cell_text,
+							 station_header_fields[i].width,
+							 station_header_fields[i].right_align,
+							 station_header_fields[i].separator_spaces);
+	}
+
+	if (assoc_label != NULL && used < sizeof(line) - 1)
+	{
+		snprintf(line + used, sizeof(line) - used, " [%s]", assoc_label);
+		used = strlen(line);
 	}
 
 	line[width] = '\0';
@@ -1420,53 +1656,67 @@ static void render_header_line(const struct airodump_tui_view * view)
 
 	if (view->freqoption)
 	{
-		used += snprintf(line + used,
-						 sizeof(line) - used,
-						 view->show_ax_channels ? " CH" : " Freq");
+		append_linef(line, sizeof(line), &used, " CH");
 		for (i = 0; i < view->num_cards; i++)
 		{
-			int value = view->frequency[i];
+			int frequency = view->frequency[i];
+			int channel = getChannelFromFrequency(frequency);
 
-			if (view->show_ax_channels)
-			{
-				int channel = getChannelFromFrequency(value);
-
-				if (channel > 0) value = channel;
-			}
-			used += snprintf(line + used,
-							 sizeof(line) - used,
-							 "%s%4d",
-							 (i == 0) ? " " : ",",
-							 value);
+			append_linef(line,
+						 sizeof(line),
+						 &used,
+						 "%s%3d (%5d MHz)",
+						 (i == 0) ? " " : ",",
+						 channel > 0 ? channel : frequency,
+						 frequency);
 		}
 	}
 	else
 	{
-		used += snprintf(line + used, sizeof(line) - used, " CH");
+		append_linef(line, sizeof(line), &used, " CH");
 		for (i = 0; i < view->num_cards; i++)
 		{
-			used += snprintf(line + used,
-							 sizeof(line) - used,
-							 "%s%2d",
-							 (i == 0) ? " " : ",",
-							 view->channel[i]);
+			int frequency = view->frequency[i];
+
+			if (frequency <= 0)
+				frequency = getFrequencyFromChannel(view->channel[i]);
+			append_linef(line,
+						 sizeof(line),
+						 &used,
+						 "%s%3d (%5d MHz)",
+						 (i == 0) ? " " : ",",
+						 view->channel[i],
+						 frequency);
 		}
 	}
 
 	if (view->band_label != NULL)
-		used += snprintf(line + used,
-						 sizeof(line) - used,
-						 " [Band: %s]",
-						 view->band_label);
+		append_linef(line, sizeof(line), &used, " [Band: %s]", view->band_label);
+	if (view->regdom_label != NULL)
+		append_linef(line, sizeof(line), &used, " [Regdom: %s]", view->regdom_label);
 
-	if (view->batt != NULL) used += snprintf(line + used, sizeof(line) - used, " %s", view->batt);
+	if (view->batt != NULL && strcmp(view->batt, "]") != 0)
+		append_linef(line, sizeof(line), &used, " %s", view->batt);
 	if (view->elapsed_time != NULL)
-		used += snprintf(line + used,
-						 sizeof(line) - used,
-						 "[ Elapsed: %s ]",
-						 view->elapsed_time);
+		append_linef(line,
+					 sizeof(line),
+					 &used,
+					 " [Elapsed: %s]",
+					 view->elapsed_time);
 	if (view->message != NULL && *view->message != '\0')
-		used += snprintf(line + used, sizeof(line) - used, " %s ]", view->message);
+	{
+		char header_message[32];
+
+		format_header_message(header_message,
+							  sizeof(header_message),
+							  view->message);
+		if (header_message[0] != '\0')
+			append_linef(line,
+						 sizeof(line),
+						 &used,
+						 " [Msg: %s]",
+						 header_message);
+	}
 
 	if (COLS < 1) return;
 	if (COLS > (int) sizeof(line)) line[sizeof(line) - 1] = '\0';
@@ -1526,7 +1776,7 @@ static void render_status_line(const struct airodump_tui_state * state,
 
 	snprintf(line,
 			 sizeof(line),
-			 "?:help | Tab/Left/Right:focus | Arrows/PgUp/PgDn/Home/End:scroll | q:quit");
+			 "?:help | v:channels | Tab/Left/Right:focus | Arrows/PgUp/PgDn/Home/End:scroll | q:quit");
 
 	if (COLS < 1) return;
 	width = MIN(COLS - 1, (int) sizeof(line) - 1);
@@ -1543,16 +1793,20 @@ static void render_help_overlay(void)
 		"Arrow keys: scroll",
 		"PgUp / PgDn: page scroll",
 		"Home / End: jump to top/bottom",
+		"Mouse wheel: scroll pane",
+		"Mouse click header: sort column",
 		"q: quit",
 		"o: toggle colors",
-		"b: switch band",
+		"b / B: switch band next/previous",
 		"r: resume hopping",
 		"d: log stations / deauth",
-		"s: cycle sort in active pane",
+		"s / S: cycle sort in active pane next/previous",
 		"R: toggle realtime sorting",
 		"M: toggle mouse capture",
 		"c: clear AP filter",
-		"g: go to channel",
+		"t: tune channel",
+		"w: write WPA snapshot",
+		"v: view channel availability",
 	};
 	const int line_count = (int) (sizeof(lines) / sizeof(lines[0]));
 	int max_len = 0;
@@ -1591,6 +1845,95 @@ static void render_help_overlay(void)
 	render_ascii_box(top, left, box_height, box_width, " Help ");
 	for (i = 0; i < visible_count; i++)
 		mvaddnstr(top + 2 + i, left + 2, lines[i], box_width - 4);
+}
+
+static void render_channel_overlay(const struct airodump_tui_state * state,
+								   const struct airodump_tui_view * view)
+{
+	int box_width;
+	int box_height;
+	int left;
+	int top;
+	int inner_width;
+	int inner_height;
+	int row_count;
+	int columns;
+	int col_width = 19;
+	int i;
+	char title[128];
+
+	if (view == NULL || view->channel_status == NULL
+		|| view->channel_status_count == 0)
+		return;
+
+	box_width = MIN(COLS - 4, 82);
+	box_height = MIN(LINES - 4, 24);
+	if (box_width < 28 || box_height < 8) return;
+
+	left = (COLS - box_width) / 2;
+	top = (LINES - box_height) / 2;
+	inner_width = box_width - 4;
+	inner_height = box_height - 5;
+	columns = MAX(1, inner_width / col_width);
+	col_width = inner_width / columns;
+	row_count = ((int) view->channel_status_count + columns - 1) / columns;
+	if (row_count > inner_height) row_count = inner_height;
+
+	attron(A_REVERSE);
+	for (i = 0; i < box_height; i++)
+	{
+		int y = top + i;
+		if (y < 0 || y >= LINES) continue;
+		mvhline(y, left, ' ', box_width);
+	}
+	attroff(A_REVERSE);
+
+	snprintf(title,
+			 sizeof(title),
+			 " Channels: %s ",
+			 view->band_label != NULL ? view->band_label : "band");
+	render_ascii_box(top, left, box_height, box_width, title);
+	mvaddnstr(top + 1,
+			  left + 2,
+			  "white: allowed  red: unavailable/refused  v/Esc: close",
+			  box_width - 4);
+
+	for (i = 0; i < (int) view->channel_status_count; i++)
+	{
+		const struct airodump_tui_channel_entry * entry = &view->channel_status[i];
+		int col = i / row_count;
+		int row = i % row_count;
+		int y = top + 3 + row;
+		int x = left + 2 + col * col_width;
+		char line[32];
+
+		if (col >= columns || y >= top + box_height - 1) continue;
+		snprintf(line,
+				 sizeof(line),
+				 "ch %3d %5d %s",
+				 entry->channel,
+				 entry->frequency,
+				 entry->status == AIRODUMP_TUI_CHANNEL_STATUS_REFUSED
+					 ? "ref"
+					 : entry->status == AIRODUMP_TUI_CHANNEL_STATUS_UNAVAILABLE
+						   ? "no "
+						   : "ok ");
+		if (entry->status != AIRODUMP_TUI_CHANNEL_STATUS_OK)
+		{
+			if (state != NULL && state->colors_enabled)
+				attron(COLOR_PAIR(1));
+			else
+				attron(A_BOLD);
+		}
+		mvaddnstr(y, x, line, MIN(col_width - 1, (int) strlen(line)));
+		if (entry->status != AIRODUMP_TUI_CHANNEL_STATUS_OK)
+		{
+			if (state != NULL && state->colors_enabled)
+				attroff(COLOR_PAIR(1));
+			else
+				attroff(A_BOLD);
+		}
+	}
 }
 
 static void ensure_colors(struct airodump_tui_state * state)
@@ -1659,6 +2002,7 @@ int airodump_tui_start(struct airodump_tui_state * state)
 	noecho();
 	keypad(stdscr, TRUE);
 	nodelay(stdscr, TRUE);
+	scrollok(stdscr, FALSE);
 	set_escdelay(25);
 	mouseinterval(0);
 	curs_set(0);
@@ -1789,13 +2133,14 @@ void airodump_tui_render(struct airodump_tui_state * state,
 	state->msg_visible_rows = MAX(1, top_height - 2);
 
 	erase();
-	render_header_line(view);
 
 	ap_count = collect_visible_aps(view->ap_end, view, &ap_rows);
 	if (view->show_ap && ap_count > 0)
 	{
 		size_t selected_index = 0;
 		size_t ap_width = measure_ap_header_width(view);
+		int ap_has_scrollbar;
+		int ap_inner_width;
 
 		selected_ap = view->selected_ap;
 		if (selected_ap != NULL)
@@ -1817,13 +2162,9 @@ void airodump_tui_render(struct airodump_tui_state * state,
 			if (row_width > ap_width)
 				ap_width = row_width;
 		}
-		if (ap_width + 2 > (size_t) state->cols)
-			ap_width = (state->cols > 2) ? (size_t) state->cols - 2 : 1;
-		ap_box_width = (int) ap_width + 2;
-		if (msg_enabled && state->cols - ap_box_width < 24)
-			ap_box_width = state->cols - 24;
-		if (ap_box_width < 24)
-			ap_box_width = 24;
+		ap_has_scrollbar = (ap_count > (size_t) state->ap_visible_rows);
+		ap_box_width = compute_ap_box_width(ap_width, state->cols, msg_enabled, ap_has_scrollbar);
+		ap_inner_width = ap_box_width - 2 - (ap_has_scrollbar ? 1 : 0);
 
 		if ((size_t) state->ap_scroll > ap_count - 1)
 			state->ap_scroll = (int) (ap_count - 1);
@@ -1850,7 +2191,7 @@ void airodump_tui_render(struct airodump_tui_state * state,
 		state->ap_box_width = ap_box_width;
 		state->ap_box_height = ap_height;
 		render_pane_box(ap_box_top, ap_box_left, ap_height, ap_box_width, " Access Points", state->focus == 0);
-		render_ap_header_row(ap_box_top + 1, ap_box_left + 1, ap_box_width - 2, state, view);
+		render_ap_header_row(ap_box_top + 1, ap_box_left + 1, ap_inner_width, state, view);
 		ap_start = (size_t) state->ap_scroll;
 		for (i = 0; i < (size_t) state->ap_visible_rows && ap_start + i < ap_count;
 			 ++i)
@@ -1858,7 +2199,7 @@ void airodump_tui_render(struct airodump_tui_state * state,
 			int selected = (ap_rows[ap_start + i] == selected_ap);
 			render_ap_row((int) i + 3,
 						  ap_box_left + 1,
-						  ap_box_width - 2,
+						  ap_inner_width,
 						  ap_rows[ap_start + i],
 						  selected,
 						  state,
@@ -1879,13 +2220,7 @@ void airodump_tui_render(struct airodump_tui_state * state,
 		ap_box_top = 1;
 		ap_height = MAX(4, ap_height);
 		ap_box_left = 0;
-		if (ap_width + 2 > (size_t) state->cols)
-			ap_width = (state->cols > 2) ? (size_t) state->cols - 2 : 1;
-		ap_box_width = (int) ap_width + 2;
-		if (msg_enabled && state->cols - ap_box_width < 24)
-			ap_box_width = state->cols - 24;
-		if (ap_box_width < 24)
-			ap_box_width = 24;
+		ap_box_width = compute_ap_box_width(ap_width, state->cols, msg_enabled, 0);
 		render_pane_box(ap_box_top, ap_box_left, ap_height, ap_box_width, " Access Points", state->focus == 0);
 		render_ap_header_row(ap_box_top + 1, ap_box_left + 1, ap_box_width - 2, state, view);
 		draw_padded_line(ap_box_top + 2, ap_box_left + 1, ap_box_width - 2, " No APs match the current filters.");
@@ -2021,11 +2356,15 @@ void airodump_tui_render(struct airodump_tui_state * state,
 		}
 		else
 		{
+			int max_scroll = MAX(0, (int) st_count - state->sta_visible_rows);
+
 			if ((size_t) state->sta_scroll > st_count - 1)
 				state->sta_scroll = (int) (st_count - 1);
 			if (state->sta_scroll < 0) state->sta_scroll = 0;
 			if (state->focus == 1 && (size_t) state->sta_scroll >= st_count)
 				state->sta_scroll = 0;
+			if (state->sta_scroll > max_scroll)
+				state->sta_scroll = max_scroll;
 
 			st_start = (size_t) state->sta_scroll;
 			for (i = 0; i < (size_t) state->sta_visible_rows && st_start + i < st_count;
@@ -2049,8 +2388,11 @@ void airodump_tui_render(struct airodump_tui_state * state,
 	}
 
 	render_status_line(state, view);
+	render_header_line(view);
 	if (state->help_visible)
 		render_help_overlay();
+	if (state->channel_overlay_visible)
+		render_channel_overlay(state, view);
 	wnoutrefresh(stdscr);
 	doupdate();
 

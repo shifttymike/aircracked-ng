@@ -115,6 +115,7 @@ struct AP_info
 	time_t tinit, tlast; /* first and last time seen */
 
 	int channel; /* AP radio channel         */
+	int band; /* AP radio band: 24, 5, 6, or 0 */
 	enum channel_width_enum channel_width; /* Channel width            */
 	char standard[3]; /* 802.11 standard: n or ac */
 	struct n_channel_info n_channel; /* 802.11n channel info     */
@@ -229,6 +230,7 @@ struct ST_info
 	int qos_to_ds; /* does it use 802.11e to ds */
 	int qos_fr_ds; /* does it receive 802.11e   */
 	int channel; /* Channel station is seen   */
+	int band; /* Station radio band: 24, 5, 6, or 0 */
 	float gps_loc_min[5]; /* min gps coordinates      */
 	float gps_loc_max[5]; /* max gps coordinates      */
 	float gps_loc_best[5]; /* best gps coordinates     */

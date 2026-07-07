@@ -147,8 +147,12 @@ static int file_read(struct wif * wi,
 
 					case IEEE80211_RADIOTAP_CHANNEL:
 						if (ri)
-							ri->ri_channel = getChannelFromFrequency(
-								le16toh(*(uint16_t *) iterator.this_arg));
+						{
+							uint16_t frequency = le16toh(*(uint16_t *) iterator.this_arg);
+
+							ri->ri_freq = frequency;
+							ri->ri_channel = getChannelFromFrequency(frequency);
+						}
 						break;
 
 					case IEEE80211_RADIOTAP_RATE:

@@ -93,12 +93,13 @@
 #define SORT_BY_DATA 4
 #define SORT_BY_PRATE 5
 #define SORT_BY_CHAN 6
-#define SORT_BY_MBIT 7
-#define SORT_BY_ENC 8
-#define SORT_BY_CIPHER 9
-#define SORT_BY_AUTH 10
-#define SORT_BY_ESSID 11
-#define MAX_SORT 11
+#define SORT_BY_STAS 7
+#define SORT_BY_MBIT 8
+#define SORT_BY_ENC 9
+#define SORT_BY_CIPHER 10
+#define SORT_BY_AUTH 11
+#define SORT_BY_ESSID 12
+#define MAX_SORT 12
 
 #define RATES "\x01\x04\x02\x04\x0B\x16\x32\x08\x0C\x12\x18\x24\x30\x48\x60\x6C"
 

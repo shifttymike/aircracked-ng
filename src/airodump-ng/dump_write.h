@@ -32,6 +32,8 @@
 #ifndef _AIRODUMP_NG_DUMP_WRITE_H_
 #define _AIRODUMP_NG_DUMP_WRITE_H_
 
+#include <stddef.h>
+
 int dump_write_csv(struct AP_info * ap_1st,
 				   struct ST_info * st_1st,
 				   unsigned int f_encrypt);
@@ -52,5 +54,8 @@ int dump_write_kismet_netxml(struct AP_info * ap_1st,
 int dump_write_kismet_csv(struct AP_info * ap_1st,
 						  struct ST_info * st_1st,
 						  unsigned int f_encrypt);
+int dump_write_wpa_snapshot(const char * filename,
+							struct ST_info * st_1st,
+							size_t * records_written);
 
 #endif /* _AIRODUMP_NG_DUMP_WRITE_H_ */

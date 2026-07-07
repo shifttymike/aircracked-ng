@@ -27,6 +27,34 @@ After installation, add `/usr/local/lib` to your `PATH` in `/etc/profile`, reboo
 
 **Target Highlighting** — Pass `-z` / `--target` with a single MAC address or a file of newline-separated MACs to highlight matching entries in the AP and STA display tables.
 
+**Locally Administered Station Flag** — The station table now includes an `LA` column that marks locally administered MAC addresses. This is a quick visual cue for randomized or privacy-preserving client addresses, which are increasingly common on modern phones, laptops, and tablets.
+
+**ncurses TUI** — `airodump-ng` now runs with a default ncurses interface in interactive terminals, with scrollable AP and station panes, a message history pane, visible selection/scroll state, mouse-click sortable headers, and a top header that shows channel, effective frequency, active band, and the active interface's kernel-reported regulatory domain. If the channel hopper tries a channel or frequency that the driver refuses, the TUI surfaces an actionable warning with the refused target and rejected count. Press `v` to view active-band channel availability; unavailable or refused targets are highlighted red.
+Band switching skips unsupported bands for the current adapter set.
+
+**airodump-ng TUI Controls**
+
+| Key / Mouse | Action |
+|-------------|--------|
+| `?` or `F1` | Show or close help |
+| `Tab` / `←` / `→` | Switch focused pane |
+| `↑` / `↓`, `PgUp` / `PgDn`, `Home` / `End` | Scroll focused pane |
+| Mouse wheel | Scroll pane under the pointer |
+| Click AP or station table header | Sort by that column |
+| `s` / `S` | Cycle sort field in active pane next / previous |
+| `R` | Toggle realtime sorting |
+| `b` / `B` | Switch active band next / previous |
+| `v` | Show channel availability for the active band; red entries are unavailable or refused |
+| `w` | Write buffered WPA/PMKID records to an IVS2 snapshot file |
+| `t` | Tune to a channel and stop hopping |
+| `l` | Lock to the selected AP's channel |
+| `r` | Resume channel hopping |
+| `d` | Run the station logging / deauth workflow with double-press confirmation |
+| `c` | Clear the selected AP filter |
+| `o` | Toggle colors |
+| `M` | Toggle mouse capture |
+| `q` | Quit, with double-press confirmation |
+
 **TCP Packet Streaming** *(2025-03-05)* — Pass `-V` / `--tcp-server` with `<ipv4>:<port>` or `<ipv4>,<port>` to set up a TCP listener that streams the pcap file header and subsequent packets to any connecting client.
 
 **802.11ax Channel Width and Segmentation** — New options for fine-grained 802.11ax channel width control: `--ax40`, `--ax80`, `--ax80+`, and `--ax160` set the capture bandwidth to 40, 80, 80+80, or 160 MHz respectively. Two companion options, `--cseg0 <freq>` and `--cseg1 <freq>`, specify center segment frequencies — `--cseg0` for the secondary center frequency on 40/80/160 MHz channels, and `--cseg1` for the second segment on 80+80 MHz configurations. These work alongside the existing HT20/HT40 options and the `-X` flag for 6E channel selection.

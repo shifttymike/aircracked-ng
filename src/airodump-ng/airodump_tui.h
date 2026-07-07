@@ -12,14 +12,24 @@
 #define STA_SORT_BY_NOTHING 0
 #define STA_SORT_BY_BSSID 1
 #define STA_SORT_BY_STATION 2
-#define STA_SORT_BY_POWER 3
-#define STA_SORT_BY_RATE 4
-#define STA_SORT_BY_LOST 5
-#define STA_SORT_BY_FRAMES 6
-#define STA_SORT_BY_NOTES 7
-#define STA_SORT_BY_PROBES 8
-#define STA_SORT_BY_LAST_SEEN 9
-#define STA_SORT_MAX 9
+#define STA_SORT_BY_BAND 3
+#define STA_SORT_BY_LA 4
+#define STA_SORT_BY_POWER 5
+#define STA_SORT_BY_RATE 6
+#define STA_SORT_BY_LOST 7
+#define STA_SORT_BY_FRAMES 8
+#define STA_SORT_BY_NOTES 9
+#define STA_SORT_BY_PROBES 10
+#define STA_SORT_BY_LAST_SEEN 11
+#define STA_SORT_MAX 11
+#define AIRODUMP_TUI_MAX_CHANNEL_STATUS 128
+
+enum airodump_tui_channel_status
+{
+	AIRODUMP_TUI_CHANNEL_STATUS_OK = 0,
+	AIRODUMP_TUI_CHANNEL_STATUS_UNAVAILABLE = 1,
+	AIRODUMP_TUI_CHANNEL_STATUS_REFUSED = 2
+};
 
 enum airodump_tui_message_style
 {
@@ -42,6 +52,7 @@ struct airodump_tui_state
 	int colors_enabled;
 	int mouse_enabled;
 	int help_visible;
+	int channel_overlay_visible;
 	int sta_sort_by;
 	int sta_sort_inv;
 	int ap_visible_rows;
@@ -59,6 +70,13 @@ struct airodump_tui_state
 	int msg_box_left;
 	int msg_box_width;
 	int msg_box_height;
+};
+
+struct airodump_tui_channel_entry
+{
+	int channel;
+	int frequency;
+	enum airodump_tui_channel_status status;
 };
 
 struct airodump_tui_message_entry
@@ -90,6 +108,9 @@ struct airodump_tui_view
 	int freqoption;
 	int show_ax_channels;
 	const char * band_label;
+	const char * regdom_label;
+	const struct airodump_tui_channel_entry * channel_status;
+	size_t channel_status_count;
 	int num_cards;
 	int channel[MAX_CARDS];
 	int frequency[MAX_CARDS];

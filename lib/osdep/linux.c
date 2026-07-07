@@ -757,10 +757,14 @@ static int linux_read(struct wif * wi,
 					break;
 
 				case IEEE80211_RADIOTAP_CHANNEL:
-					ri->ri_channel = getChannelFromFrequency(
-						le16toh(*(uint16_t *) iterator.this_arg));
+				{
+					uint16_t frequency = le16toh(*(uint16_t *) iterator.this_arg);
+
+					ri->ri_freq = frequency;
+					ri->ri_channel = getChannelFromFrequency(frequency);
 					got_channel = 1;
 					break;
+				}
 
 				case IEEE80211_RADIOTAP_RATE:
 					ri->ri_rate = (*iterator.this_arg) * 500000;
@@ -1347,8 +1351,14 @@ static int linux_set_freq_ax(struct wif *wi, int freq, int bandwidth, int c_seg0
         return 0;
     }
 
-    // If iw command fails, fallback to ioctl using SIOCSIWFREQ (Wireless Extensions)
-    //printf("iw command failed, falling back to ioctl\n");
+    /*
+     * If iw fails, only try the legacy ioctl fallback for plain 20 MHz
+     * 2.4/5 GHz tuning.  6 GHz and wider AX requests are not safely
+     * representable via SIOCSIWFREQ, and the fallback can tear down the
+     * interface on capable radios.
+     */
+    if (freq >= 5925 || bandwidth != 0)
+        return (1);
 
     // Set up the ioctl request to set the frequency
     memset(&wrq, 0, sizeof(struct iwreq));
