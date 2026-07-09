@@ -72,6 +72,7 @@ This document summarizes the behavior changes made in this workspace.
 - AP and station table headers can be sorted with a mouse press.
 - Mouse sorting triggers on button press instead of release, so holding the click does not cancel the sort.
 - The AP `STAs` column is sortable and uses the BSS load station count.
+- The AP `STAs` column now shows `visible/advertised`, where `visible` is the number of stations seen within the Berlin window and `advertised` comes from BSS Load.
 - AP `ESSID` sorting is stable across refreshes and keeps hidden SSIDs grouped consistently.
 - Station sorting includes the `LA` column.
 

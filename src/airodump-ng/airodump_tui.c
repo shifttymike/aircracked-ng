@@ -117,7 +117,7 @@ static const struct ap_header_field ap_header_fields[] = {
 	{ SORT_BY_PRATE, "#/s", 4, 1, 2 },
 	{ SORT_BY_CHAN, "CH", 3, 1, 2 },
 	{ -1, "Band", 4, 0, 2 },
-	{ SORT_BY_STAS, "STAs", 4, 1, 2 },
+	{ SORT_BY_STAS, "STAs", 11, 1, 2 },
 	{ SORT_BY_ENC, "ENC", 6, 0, 1 },
 	{ SORT_BY_CIPHER, "CIPHER", 7, 0, 1 },
 	{ SORT_BY_AUTH, "AUTH", 7, 0, 1 },
@@ -755,9 +755,61 @@ static void format_bss_load_station_count(const struct AP_info * ap,
 										  size_t out_len)
 {
 	if (ap != NULL && ap->bss_load_station_count >= 0)
-		snprintf(out, out_len, "%4d", ap->bss_load_station_count);
+		snprintf(out, out_len, "%d", ap->bss_load_station_count);
 	else
-		strlcpy(out, "   ?", out_len);
+		strlcpy(out, "?", out_len);
+}
+
+static int visible_ap_station_count(const struct AP_info * ap,
+									const struct airodump_tui_view * view)
+{
+	int count = 0;
+	struct ST_info * st_cur;
+
+	if (ap == NULL || view == NULL) return (0);
+
+	st_cur = view->st_1st;
+	while (st_cur != NULL)
+	{
+		if (time(NULL) - st_cur->tlast <= view->berlin)
+		{
+			if (memcmp(ap->bssid, BROADCAST, 6) == 0)
+			{
+				if (st_cur->base != NULL
+					&& memcmp(st_cur->base->bssid, BROADCAST, 6) == 0)
+					count++;
+			}
+			else if (st_cur->base == ap)
+			{
+				count++;
+			}
+		}
+		st_cur = st_cur->next;
+	}
+
+	return (count);
+}
+
+static void format_ap_station_counts(char * out,
+									 size_t out_len,
+									 const struct AP_info * ap,
+									 const struct airodump_tui_view * view)
+{
+	int visible_count;
+	char advertised[16];
+	char tmp[32];
+
+	if (out == NULL || out_len == 0)
+		return;
+
+	visible_count = visible_ap_station_count(ap, view);
+	format_bss_load_station_count(ap, advertised, sizeof(advertised));
+	if (ap != NULL && ap->bss_load_station_count >= 0)
+		snprintf(tmp, sizeof(tmp), "%d/%s", visible_count, advertised);
+	else
+		snprintf(tmp, sizeof(tmp), "%d/?", visible_count);
+
+	strlcpy(out, tmp, out_len);
 }
 
 static void fill_inner_width(int y, int x, int width)
@@ -877,7 +929,7 @@ static void append_ap_core_columns(char * line,
 	append_padded_column(line, line_size, used, rate, 4, 1, 2);
 	append_padded_column(line, line_size, used, channel, 3, 1, 2);
 	append_padded_column(line, line_size, used, band, 4, 0, 2);
-	append_padded_column(line, line_size, used, stas, 4, 1, 2);
+	append_padded_column(line, line_size, used, stas, 11, 1, 2);
 	append_padded_column(line, line_size, used, std, 6, 0, 1);
 	append_padded_column(line, line_size, used, cipher, 7, 0, 1);
 	append_padded_column(line, line_size, used, auth, 7, 0, 1);
@@ -1159,7 +1211,7 @@ static void render_ap_row(int y,
 	security_cipher_string(cipher, sizeof(cipher), ap->security);
 	security_auth_string(auth, sizeof(auth), ap->security);
 	security_std_string(std, sizeof(std), ap->security);
-	format_bss_load_station_count(ap, stas, sizeof(stas));
+	format_ap_station_counts(stas, sizeof(stas), ap, view);
 	pair = power_pair(ap);
 	snprintf(bssid,
 			 sizeof(bssid),
@@ -1278,7 +1330,7 @@ static size_t measure_ap_row_width(const struct AP_info * ap,
 	security_cipher_string(cipher, sizeof(cipher), ap->security);
 	security_auth_string(auth, sizeof(auth), ap->security);
 	security_std_string(std, sizeof(std), ap->security);
-	format_bss_load_station_count(ap, stas, sizeof(stas));
+	format_ap_station_counts(stas, sizeof(stas), ap, view);
 	snprintf(bssid,
 			 sizeof(bssid),
 			 "%02X:%02X:%02X:%02X:%02X:%02X",
@@ -1731,14 +1783,25 @@ static void render_header_line(const struct airodump_tui_view * view)
 static void render_pane_box(int top, int left, int height, int cols, const char * title, int active)
 {
 	char line[256];
+	const char * title_text;
 	size_t title_len;
 
 	if (cols < 3 || height < 2) return;
-	title_len = strlen(title);
-	if (title_len > sizeof(line) - 4) title_len = sizeof(line) - 4;
-	snprintf(line, sizeof(line), " %.*s ", (int) title_len, title);
-	attron(A_BOLD);
-	if (active) attron(A_REVERSE);
+	title_text = title;
+	while (*title_text == ' ')
+		title_text++;
+	title_len = strlen(title_text);
+	if (active)
+	{
+		if (title_len > sizeof(line) - 6) title_len = sizeof(line) - 6;
+		snprintf(line, sizeof(line), " [ %.*s ] ", (int) title_len, title_text);
+	}
+	else
+	{
+		if (title_len > sizeof(line) - 4) title_len = sizeof(line) - 4;
+		snprintf(line, sizeof(line), " %.*s ", (int) title_len, title_text);
+	}
+	if (active) attron(A_BOLD);
 	mvaddch(top, left, ACS_ULCORNER);
 	mvhline(top, left + 1, ACS_HLINE, cols - 2);
 	mvaddch(top, left + cols - 1, ACS_URCORNER);
@@ -1762,8 +1825,7 @@ static void render_pane_box(int top, int left, int height, int cols, const char 
 		mvhline(top + 1, left + 1, ACS_HLINE, cols - 2);
 		mvaddch(top + 1, left + cols - 1, ACS_LRCORNER);
 	}
-	if (active) attroff(A_REVERSE);
-	attroff(A_BOLD);
+	if (active) attroff(A_BOLD);
 }
 
 static void render_status_line(const struct airodump_tui_state * state,

@@ -8845,20 +8845,24 @@ static int lock_selected_ap_channel(void)
 	if (!park_on_channel(ap_cur->channel))
 		return (0);
 
-	if (lopt.freqoption)
 	{
-		snprintf(lopt.message,
-				 sizeof(lopt.message),
-				 "][ locked to AP channel %d (%d MHz)",
-				 ap_cur->channel,
-				 channel_to_frequency(ap_cur->channel));
-	}
-	else
-	{
-		snprintf(lopt.message,
-				 sizeof(lopt.message),
-				 "][ locked to AP channel %d",
-				 ap_cur->channel);
+		int frequency = channel_to_frequency(ap_cur->channel);
+
+		if (frequency > 0)
+		{
+			snprintf(lopt.message,
+					 sizeof(lopt.message),
+					 "][ Locked to channel %d (%d MHz)",
+					 ap_cur->channel,
+					 frequency);
+		}
+		else
+		{
+			snprintf(lopt.message,
+					 sizeof(lopt.message),
+					 "][ Locked to channel %d",
+					 ap_cur->channel);
+		}
 	}
 	append_tui_message_history_now(lopt.message);
 	return (1);
