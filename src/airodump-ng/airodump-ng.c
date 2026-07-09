@@ -134,10 +134,15 @@ static int abg_chans[]
 	   60,  62,  64,  100, 102, 104, 106, 108, 110, 112, 114, 116, 118,
 	   120, 122, 124, 126, 128, 132, 134, 136, 138, 140, 142, 144, 149,
 	   151, 153, 155, 157, 159, 161, 165, 169, 173, 0};
-
 static int bg_chans[] = {1, 7, 13, 2, 8, 3, 14, 9, 4, 10, 5, 11, 6, 12, 0};
+static const int bg_chans_base[] = {1, 7, 13, 2, 8, 3, 14, 9, 4, 10, 5, 11, 6, 12, 0};
 
 static int a_chans[]
+	= {36,  38,  40,  42,  44,  46,  48,  50,  52,  54,  56,  58,
+	   60,  62,  64,  100, 102, 104, 106, 108, 110, 112, 114, 116,
+	   118, 120, 122, 124, 126, 128, 132, 134, 136, 138, 140, 142,
+	   144, 149, 151, 153, 155, 157, 159, 161, 165, 169, 173, 0};
+static const int a_chans_base[]
 	= {36,  38,  40,  42,  44,  46,  48,  50,  52,  54,  56,  58,
 	   60,  62,  64,  100, 102, 104, 106, 108, 110, 112, 114, 116,
 	   118, 120, 122, 124, 126, 128, 132, 134, 136, 138, 140, 142,
@@ -155,9 +160,26 @@ int ax_all_chans[]
 	   187, 189, 191, 193, 195, 197, 199, 201, 203, 205, 207, 209,
 	   211, 213, 215, 217, 219, 221, 223, 225, 227, 229, 231, 233,
 	   0};
+static const int ax_all_chans_base[] 
+	= {1,   2,   5,   9,   13,  17,  21,  25,  27,  29,  33,  37,
+	   41,  45,  47,  49,  51,  53,  55,  57,  59,  61,  63,  65,
+	   67,  69,  71,  73,  75,  77,  79,  81,  83,  85,  87,  89,
+	   91,  93,  95,  97,  99,  101, 103, 105, 107, 109, 111, 113,
+	   115, 117, 119, 121, 123, 125, 127, 129, 131, 133, 135, 137,
+	   139, 141, 143, 145, 147, 149, 151, 153, 155, 157, 159, 161,
+	   163, 165, 167, 169, 171, 173, 175, 177, 179, 181, 183, 185,
+	   187, 189, 191, 193, 195, 197, 199, 201, 203, 205, 207, 209,
+	   211, 213, 215, 217, 219, 221, 223, 225, 227, 229, 231, 233,
+	   0};
 
 // Define an array of the ax primary channels
 static int ax_chans[] 
+	= {1,   2,   5,   9,   13,  17,  21,  25,  29,  33,  37,  41,
+	   45,  49,  53,  57,  61,  65,  69,  73,  77,  81,  85,  89,
+	   93,  97,  101, 105, 109, 113, 117, 121, 125, 129, 133, 137,
+	   141, 145, 149, 153, 157, 161, 165, 169, 173, 177, 181, 185,
+	   189, 193, 197, 201, 205, 209, 213, 217, 221, 225, 229, 233, 0};
+static const int ax_chans_base[] 
 	= {1,   2,   5,   9,   13,  17,  21,  25,  29,  33,  37,  41,
 	   45,  49,  53,  57,  61,  65,  69,  73,  77,  81,  85,  89,
 	   93,  97,  101, 105, 109, 113, 117, 121, 125, 129, 133, 137,
@@ -595,8 +617,18 @@ static volatile sig_atomic_t hopper_reject_notice_emitted = 0;
 static volatile sig_atomic_t hopper_refused_values[AIRODUMP_TUI_MAX_CHANNEL_STATUS];
 static volatile sig_atomic_t hopper_refused_is_freq[AIRODUMP_TUI_MAX_CHANNEL_STATUS];
 static volatile sig_atomic_t hopper_refused_count = 0;
+static volatile sig_atomic_t hopper_validated_values[AIRODUMP_TUI_MAX_CHANNEL_STATUS];
+static volatile sig_atomic_t hopper_validated_is_freq[AIRODUMP_TUI_MAX_CHANNEL_STATUS];
+static volatile sig_atomic_t hopper_validated_count = 0;
 static pid_t main_pid = -1;
+enum input_entry_mode
+{
+	INPUT_ENTRY_NONE = 0,
+	INPUT_ENTRY_CHANNEL = 1,
+	INPUT_ENTRY_REGDOM = 2,
+};
 static int channel_entry_active = 0;
+static int channel_entry_mode = INPUT_ENTRY_NONE;
 static char channel_entry_buf[8];
 static char channel_entry_prompt[128];
 static size_t channel_entry_len = 0;
@@ -633,9 +665,12 @@ static int band_from_frequency_or_channel(int frequency, int channel);
 static int band_from_rx_info(const struct rx_info * ri, int channel);
 static int channel_is_valid_for_band(int channel);
 static int park_on_channel(int channel);
+static int build_ax_frequency_list(int ** freqs_out);
 static void begin_channel_entry(void);
+static void begin_regdom_entry(void);
 static void cancel_channel_entry(const char * message);
 static int apply_channel_entry(void);
+static int apply_regdom_entry(void);
 static int lock_selected_ap_channel(void);
 static int infer_band_mode(void);
 static int band_support_mask_for_interface(const char * ifname);
@@ -655,6 +690,7 @@ static void append_tui_message_history(const char * message, time_t timestamp);
 static void append_tui_message_history_now(const char * message);
 static int normalize_tui_message(const char * message, char * out, size_t out_len);
 static void reset_hopper_reject_state(void);
+static void reset_hopper_scan_list(void);
 static void update_hopper_reject_message(void);
 static void process_hopper_event(int card, int value);
 static void record_hopper_refused_target(int value, int is_freq);
@@ -672,6 +708,8 @@ static int ap_essid_compare(const struct AP_info * lhs, const struct AP_info * r
 static int ap_band_mode(const struct AP_info * ap);
 static int ensure_band_mode(int band_mode);
 static void set_channel_entry_prompt(void);
+static int set_kernel_regdom(const char * country);
+static int refresh_hopper_after_regdom_change(void);
 static int write_wpa_snapshot(void);
 static int get_active_phy_index(void);
 static int get_kernel_regdom(char * out, size_t out_len, int * self_managed);
@@ -1775,6 +1813,7 @@ static const char usage[] =
 	"      R                     : Toggle realtime sorting\n"
 	"      b / B                 : Switch band next / previous\n"
 	"      v                     : Show channel availability for active band\n"
+	"      g                     : Set regulatory domain\n"
 	"      w                     : Write buffered WPA/PMKID snapshot\n"
 	"      t                     : Tune channel and stop hopping\n"
 	"      l                     : Lock to selected AP channel\n"
@@ -4759,7 +4798,61 @@ static void reset_hopper_reject_state(void)
 	hopper_reject_is_freq = 0;
 	hopper_event_pending = 0;
 	hopper_refused_count = 0;
+	hopper_validated_count = 0;
 	hopper_reject_notice_emitted = 0;
+}
+
+static void reset_hopper_scan_list(void)
+{
+	if (lopt.band_mode == BAND_MODE_AX)
+	{
+		int * fresh_freqs = NULL;
+
+		memcpy(ax_all_chans, ax_all_chans_base, sizeof(ax_all_chans_base));
+		memcpy(ax_chans, ax_chans_base, sizeof(ax_chans_base));
+		if (build_ax_frequency_list(&fresh_freqs))
+		{
+			if (lopt.own_frequencies != NULL)
+				free(lopt.own_frequencies);
+			lopt.own_frequencies = fresh_freqs;
+			lopt.channels = (int *) ax_chans;
+			lopt.freqoption = 1;
+			lopt.chanoption = 0;
+		}
+	}
+	else if (lopt.band_mode == BAND_MODE_A)
+	{
+		memcpy(a_chans, a_chans_base, sizeof(a_chans_base));
+		lopt.channels = (int *) a_chans;
+		lopt.freqoption = 0;
+		lopt.chanoption = 1;
+	}
+	else
+	{
+		memcpy(bg_chans, bg_chans_base, sizeof(bg_chans_base));
+		lopt.channels = (int *) bg_chans;
+		lopt.freqoption = 0;
+		lopt.chanoption = 1;
+	}
+}
+
+static int refresh_hopper_after_regdom_change(void)
+{
+	int hopper_was_running = (hopper_pid > 0);
+
+	if (hopper_was_running)
+		stop_hopper();
+
+	reset_hopper_scan_list();
+	reset_hopper_reject_state();
+
+	if (hopper_was_running)
+	{
+		if (!resume_hopper())
+			return (0);
+	}
+
+	return (1);
 }
 
 static void record_hopper_refused_target(int value, int is_freq)
@@ -4793,6 +4886,42 @@ static int hopper_target_refused(int value, int is_freq)
 	{
 		if (hopper_refused_values[i] == value
 			&& hopper_refused_is_freq[i] == is_freq)
+			return (1);
+	}
+	return (0);
+}
+
+static void record_hopper_validated_target(int value, int is_freq)
+{
+	sig_atomic_t i;
+	sig_atomic_t count;
+
+	if (value <= 0) return;
+	count = hopper_validated_count;
+	for (i = 0; i < count; i++)
+	{
+		if (hopper_validated_values[i] == value
+			&& hopper_validated_is_freq[i] == is_freq)
+			return;
+	}
+	if (count >= (sig_atomic_t) ArrayCount(hopper_validated_values))
+		return;
+	hopper_validated_values[count] = value;
+	hopper_validated_is_freq[count] = is_freq;
+	hopper_validated_count = count + 1;
+}
+
+static int hopper_target_validated(int value, int is_freq)
+{
+	sig_atomic_t i;
+	sig_atomic_t count;
+
+	if (value <= 0) return (0);
+	count = hopper_validated_count;
+	for (i = 0; i < count; i++)
+	{
+		if (hopper_validated_values[i] == value
+			&& hopper_validated_is_freq[i] == is_freq)
 			return (1);
 	}
 	return (0);
@@ -4893,11 +5022,15 @@ static void process_hopper_event(int card, int value)
 		record_hopper_refused_target(refused_value, is_freq);
 	}
 	else if (lopt.freqoption)
+	{
 		lopt.frequency[card] = value;
+		record_hopper_validated_target(value, 1);
+	}
 	else
 	{
 		lopt.channel[card] = value;
 		lopt.frequency[card] = channel_to_frequency(lopt.channel[card]);
+		record_hopper_validated_target(value, 0);
 	}
 }
 
@@ -4931,6 +5064,7 @@ static size_t build_channel_status_entries(struct airodump_tui_channel_entry * e
 		int frequency;
 		int refused_value;
 		int available = 1;
+		int validated = 0;
 
 		if (channel < 0) continue;
 		if (lopt.band_mode == BAND_MODE_AX)
@@ -4940,11 +5074,13 @@ static size_t build_channel_status_entries(struct airodump_tui_channel_entry * e
 		if (frequency <= 0)
 			frequency = channel_to_frequency(channel);
 		refused_value = is_freq ? frequency : channel;
+		validated = hopper_target_validated(refused_value, is_freq);
 		if (lopt.band_mode == BAND_MODE_AX)
 			available = ax_frequency_in_hopper_list(frequency);
 
 		entries[count].channel = channel;
 		entries[count].frequency = frequency;
+		entries[count].validated = validated;
 		if (hopper_target_refused(refused_value, is_freq))
 			entries[count].status = AIRODUMP_TUI_CHANNEL_STATUS_REFUSED;
 		else if (!available)
@@ -4979,11 +5115,49 @@ static void update_hopper_reject_message(void)
 
 static void set_channel_entry_prompt(void)
 {
-	snprintf(channel_entry_prompt,
-			 sizeof(channel_entry_prompt),
-			 "select channel for %s: %s_",
-			 band_mode_label(lopt.band_mode),
-			 channel_entry_buf);
+	if (channel_entry_mode == INPUT_ENTRY_REGDOM)
+	{
+		snprintf(channel_entry_prompt,
+				 sizeof(channel_entry_prompt),
+				 "set regdom: %s_",
+				 channel_entry_buf);
+	}
+	else
+	{
+		snprintf(channel_entry_prompt,
+				 sizeof(channel_entry_prompt),
+				 "select channel for %s: %s_",
+				 band_mode_label(lopt.band_mode),
+				 channel_entry_buf);
+	}
+}
+
+static int set_kernel_regdom(const char * country)
+{
+	char cmd[64];
+	int rc;
+
+	if (country == NULL || strlen(country) != 2) return (0);
+	get_cached_regdom(1);
+	if (get_cached_regdom_self_managed())
+	{
+		snprintf(lopt.message,
+				 sizeof(lopt.message),
+				 "][ Interface's regdom is self-managed, we can't change it :(");
+		append_tui_message_history_now(lopt.message);
+		return (0);
+	}
+
+	snprintf(cmd, sizeof(cmd), "iw reg set %s >/dev/null 2>&1", country);
+	rc = system(cmd);
+	if (rc != 0)
+		return (0);
+
+	regdom_refresh_pending = 1;
+	get_cached_regdom(1);
+	if (!refresh_hopper_after_regdom_change())
+		return (0);
+	return (1);
 }
 
 static int get_active_phy_index(void)
@@ -5990,14 +6164,27 @@ static int handle_keycode(int keycode)
 	{
 		if (keycode == 27 || keycode == KEY_ESCAPE)
 		{
-			cancel_channel_entry("][ channel entry cancelled");
+			cancel_channel_entry(channel_entry_mode == INPUT_ENTRY_REGDOM
+									? "][ regdom entry cancelled"
+									: "][ channel entry cancelled");
 			redraw = 1;
 			goto done;
 		}
 
 		if (keycode == '\n' || keycode == '\r' || keycode == KEY_ENTER)
 		{
-			if (apply_channel_entry())
+			if (channel_entry_mode == INPUT_ENTRY_REGDOM)
+			{
+				if (apply_regdom_entry())
+				{
+					redraw = 1;
+				}
+				else
+				{
+					redraw = 1;
+				}
+			}
+			else if (apply_channel_entry())
 			{
 				redraw = 1;
 			}
@@ -6020,11 +6207,24 @@ static int handle_keycode(int keycode)
 			goto done;
 		}
 
-		if (isdigit((unsigned char) keycode))
+		if (channel_entry_mode == INPUT_ENTRY_CHANNEL
+			&& isdigit((unsigned char) keycode))
 		{
 			if (channel_entry_len < sizeof(channel_entry_buf) - 1)
 			{
 				channel_entry_buf[channel_entry_len++] = (char) keycode;
+				channel_entry_buf[channel_entry_len] = '\0';
+				set_channel_entry_prompt();
+				if (use_ncurses_tui)
+					render_output_view(0);
+			}
+		}
+		else if (channel_entry_mode == INPUT_ENTRY_REGDOM
+				 && isalpha((unsigned char) keycode))
+		{
+			if (channel_entry_len < 2)
+			{
+				channel_entry_buf[channel_entry_len++] = (char) toupper((unsigned char) keycode);
 				channel_entry_buf[channel_entry_len] = '\0';
 				set_channel_entry_prompt();
 				if (use_ncurses_tui)
@@ -6180,6 +6380,12 @@ static int handle_keycode(int keycode)
 	if (keycode == 't')
 	{
 		begin_channel_entry();
+		goto done;
+	}
+
+	if (keycode == 'g')
+	{
+		begin_regdom_entry();
 		goto done;
 	}
 
@@ -8813,6 +9019,18 @@ static int park_on_channel(int channel)
 
 static void begin_channel_entry(void)
 {
+	channel_entry_mode = INPUT_ENTRY_CHANNEL;
+	channel_entry_active = 1;
+	channel_entry_len = 0;
+	channel_entry_buf[0] = '\0';
+	set_channel_entry_prompt();
+	if (use_ncurses_tui)
+		render_output_view(0);
+}
+
+static void begin_regdom_entry(void)
+{
+	channel_entry_mode = INPUT_ENTRY_REGDOM;
 	channel_entry_active = 1;
 	channel_entry_len = 0;
 	channel_entry_buf[0] = '\0';
@@ -8824,6 +9042,7 @@ static void begin_channel_entry(void)
 static void cancel_channel_entry(const char * message)
 {
 	channel_entry_active = 0;
+	channel_entry_mode = INPUT_ENTRY_NONE;
 	channel_entry_len = 0;
 	channel_entry_buf[0] = '\0';
 	channel_entry_prompt[0] = '\0';
@@ -8838,6 +9057,7 @@ static int apply_channel_entry(void)
 
 	channel = atoi(channel_entry_buf);
 	channel_entry_active = 0;
+	channel_entry_mode = INPUT_ENTRY_NONE;
 	channel_entry_len = 0;
 	channel_entry_buf[0] = '\0';
 	channel_entry_prompt[0] = '\0';
@@ -8860,6 +9080,47 @@ static int apply_channel_entry(void)
 			 "][ channel %d selected (%d MHz)",
 			 channel,
 			 frequency);
+	append_tui_message_history_now(lopt.message);
+	return (1);
+}
+
+static int apply_regdom_entry(void)
+{
+	char country[3];
+
+	if (channel_entry_len != 2)
+	{
+		channel_entry_active = 0;
+		channel_entry_mode = INPUT_ENTRY_NONE;
+		channel_entry_len = 0;
+		channel_entry_buf[0] = '\0';
+		channel_entry_prompt[0] = '\0';
+		snprintf(lopt.message,
+				 sizeof(lopt.message),
+				 "][ invalid regdom entry");
+		append_tui_message_history_now(lopt.message);
+		return (0);
+	}
+
+	country[0] = (char) toupper((unsigned char) channel_entry_buf[0]);
+	country[1] = (char) toupper((unsigned char) channel_entry_buf[1]);
+	country[2] = '\0';
+
+	channel_entry_active = 0;
+	channel_entry_mode = INPUT_ENTRY_NONE;
+	channel_entry_len = 0;
+	channel_entry_buf[0] = '\0';
+	channel_entry_prompt[0] = '\0';
+
+	if (!set_kernel_regdom(country))
+	{
+		return (0);
+	}
+
+	snprintf(lopt.message,
+			 sizeof(lopt.message),
+			 "][ regdom requested: %s",
+			 country);
 	append_tui_message_history_now(lopt.message);
 	return (1);
 }

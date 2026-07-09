@@ -77,6 +77,7 @@ struct airodump_tui_channel_entry
 	int channel;
 	int frequency;
 	enum airodump_tui_channel_status status;
+	int validated;
 };
 
 struct airodump_tui_message_entry

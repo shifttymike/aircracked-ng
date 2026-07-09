@@ -1843,7 +1843,7 @@ static void render_status_line(const struct airodump_tui_state * state,
 
 	snprintf(line,
 			 sizeof(line),
-			 "?:help | v:channels | Tab/Left/Right:focus | Arrows/PgUp/PgDn/Home/End:scroll | q:quit");
+			 "?:help | v:channels | g:regdom | Tab/Left/Right:focus | Arrows/PgUp/PgDn/Home/End:scroll | q:quit");
 
 	if (COLS < 1) return;
 	width = MIN(COLS - 1, (int) sizeof(line) - 1);
@@ -1865,6 +1865,7 @@ static void render_help_overlay(void)
 		"q: quit",
 		"o: toggle colors",
 		"b / B: switch band next/previous",
+		"g: set regdom",
 		"r: resume hopping",
 		"d: log stations / deauth",
 		"s / S: cycle sort in active pane next/previous",
@@ -1969,7 +1970,7 @@ static void render_channel_overlay(const struct airodump_tui_state * state,
 	render_ascii_box(top, left, box_height, box_width, title);
 	mvaddnstr(top + 1,
 			  left + 2,
-			  "white: allowed  red: unavailable/refused  v/Esc: close",
+			  "green: ok  red: unavailable/refused  v/Esc: close",
 			  box_width - 4);
 
 	for (i = 0; i < (int) view->channel_status_count; i++)
@@ -1991,21 +1992,31 @@ static void render_channel_overlay(const struct airodump_tui_state * state,
 					 ? "ref"
 					 : entry->status == AIRODUMP_TUI_CHANNEL_STATUS_UNAVAILABLE
 						   ? "no "
-						   : "ok ");
-		if (entry->status != AIRODUMP_TUI_CHANNEL_STATUS_OK)
+						   : entry->validated ? "ok " : "   ");
+		if (entry->status == AIRODUMP_TUI_CHANNEL_STATUS_REFUSED
+			|| entry->status == AIRODUMP_TUI_CHANNEL_STATUS_UNAVAILABLE)
 		{
 			if (state != NULL && state->colors_enabled)
 				attron(COLOR_PAIR(1));
 			else
 				attron(A_BOLD);
 		}
+		else if (entry->validated && state != NULL && state->colors_enabled)
+		{
+			attron(COLOR_PAIR(2));
+		}
 		mvaddnstr(y, x, line, MIN(col_width - 1, (int) strlen(line)));
-		if (entry->status != AIRODUMP_TUI_CHANNEL_STATUS_OK)
+		if (entry->status == AIRODUMP_TUI_CHANNEL_STATUS_REFUSED
+			|| entry->status == AIRODUMP_TUI_CHANNEL_STATUS_UNAVAILABLE)
 		{
 			if (state != NULL && state->colors_enabled)
 				attroff(COLOR_PAIR(1));
 			else
 				attroff(A_BOLD);
+		}
+		else if (entry->validated && state != NULL && state->colors_enabled)
+		{
+			attroff(COLOR_PAIR(2));
 		}
 	}
 }
