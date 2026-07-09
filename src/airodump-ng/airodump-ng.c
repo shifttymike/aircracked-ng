@@ -590,6 +590,8 @@ static volatile sig_atomic_t hopper_reject_card = -1;
 static volatile sig_atomic_t hopper_reject_value = 0;
 static volatile sig_atomic_t hopper_reject_is_freq = 0;
 static volatile sig_atomic_t regdom_refresh_pending = 0;
+static volatile sig_atomic_t cached_regdom_self_managed = 0;
+static volatile sig_atomic_t hopper_reject_notice_emitted = 0;
 static volatile sig_atomic_t hopper_refused_values[AIRODUMP_TUI_MAX_CHANNEL_STATUS];
 static volatile sig_atomic_t hopper_refused_is_freq[AIRODUMP_TUI_MAX_CHANNEL_STATUS];
 static volatile sig_atomic_t hopper_refused_count = 0;
@@ -625,6 +627,7 @@ static void channel_hopper(struct wif * wi[], int if_num, int chan_count, pid_t 
 static void frequency_hopper(struct wif * wi[], int if_num, int chan_count, pid_t parent);
 static int channel_to_frequency_ax(int channel);
 static int channel_to_frequency(int channel);
+static int channel_to_frequency_for_band_mode(int band_mode, int channel);
 static int frequency_to_channel(int frequency);
 static int band_from_frequency_or_channel(int frequency, int channel);
 static int band_from_rx_info(const struct rx_info * ri, int channel);
@@ -666,12 +669,15 @@ static int ap_security_cipher_rank(unsigned int security);
 static int ap_security_auth_rank(unsigned int security);
 static int ap_station_count_rank(const struct AP_info * ap);
 static int ap_essid_compare(const struct AP_info * lhs, const struct AP_info * rhs);
+static int ap_band_mode(const struct AP_info * ap);
+static int ensure_band_mode(int band_mode);
 static void set_channel_entry_prompt(void);
 static int write_wpa_snapshot(void);
 static int get_active_phy_index(void);
-static int get_kernel_regdom(char * out, size_t out_len);
-static void cache_kernel_regdom(const char * regdom);
+static int get_kernel_regdom(char * out, size_t out_len, int * self_managed);
+static void cache_kernel_regdom(const char * regdom, int self_managed);
 static const char * get_cached_regdom(int force_refresh);
+static int get_cached_regdom_self_managed(void);
 static void set_message_follow_latest(int follow_latest);
 static int tui_message_pane_visible(void);
 static void set_tui_focus(int focus);
@@ -1137,6 +1143,7 @@ static int launch_deauth(void)
 	int i;
 	int new_channel;
 	int new_frequency;
+	int ap_band_mode_value;
 	int status;
 	int launched_any = 0;
 
@@ -1157,6 +1164,10 @@ static int launch_deauth(void)
 		deauth_refuse_with_message("Selected AP is the unassociated-client entry");
 		return (0);
 	}
+
+	ap_band_mode_value = ap_band_mode(ap_cur);
+	if (!ensure_band_mode(ap_band_mode_value))
+		return (0);
 
 	if (g_wi == NULL || g_wi[0] == NULL)
 	{
@@ -1193,7 +1204,8 @@ static int launch_deauth(void)
 
 	if (lopt.freqoption)
 	{
-		new_frequency = channel_to_frequency(ap_cur->channel);
+		new_frequency = channel_to_frequency_for_band_mode(ap_band_mode_value,
+															ap_cur->channel);
 		if (new_frequency <= 0)
 		{
 			snprintf(lopt.message,
@@ -4297,8 +4309,6 @@ write_packet:
 
 static void dump_sort(void)
 {
-	time_t tt = time(NULL);
-
 	/* thanks to Arnaud Cornet :-) */
 
 	struct AP_info * new_ap_1st = NULL;
@@ -4313,18 +4323,9 @@ static void dump_sort(void)
 		ap_min = NULL;
 		ap_cur = lopt.ap_1st;
 
-		while (ap_cur != NULL)
-		{
-			if (tt - ap_cur->tlast > 20) ap_min = ap_cur;
+		ap_min = ap_cur = lopt.ap_1st;
 
-			ap_cur = ap_cur->next;
-		}
-
-		if (ap_min == NULL)
-		{
-			ap_min = ap_cur = lopt.ap_1st;
-
-			/*#define SORT_BY_BSSID	1
+		/*#define SORT_BY_BSSID	1
 #define SORT_BY_POWER	2
 #define SORT_BY_BEACON	3
 #define SORT_BY_DATA	4
@@ -4336,95 +4337,90 @@ static void dump_sort(void)
 #define SORT_BY_AUTH	11
 #define SORT_BY_ESSID	12*/
 
-			while (ap_cur != NULL)
+		while (ap_cur != NULL)
+		{
+			switch (lopt.sort_by)
 			{
-				switch (lopt.sort_by)
+				case SORT_BY_BSSID:
+					if (memcmp(ap_cur->bssid, ap_min->bssid, 6)
+							* lopt.sort_inv
+						< 0)
+						ap_min = ap_cur;
+					break;
+				case SORT_BY_POWER:
+					if ((ap_cur->avg_power - ap_min->avg_power) * lopt.sort_inv
+						< 0)
+						ap_min = ap_cur;
+					break;
+				case SORT_BY_BEACON:
+					if ((ap_cur->nb_bcn < ap_min->nb_bcn) && lopt.sort_inv)
+						ap_min = ap_cur;
+					break;
+				case SORT_BY_DATA:
+					if ((ap_cur->nb_data < ap_min->nb_data) && lopt.sort_inv)
+						ap_min = ap_cur;
+					break;
+				case SORT_BY_PRATE:
+					if ((ap_cur->nb_dataps - ap_min->nb_dataps) * lopt.sort_inv
+						< 0)
+						ap_min = ap_cur;
+					break;
+				case SORT_BY_CHAN:
+					if ((ap_cur->channel - ap_min->channel) * lopt.sort_inv
+						< 0)
+						ap_min = ap_cur;
+					break;
+				case SORT_BY_STAS:
 				{
-					case SORT_BY_BSSID:
-						if (memcmp(ap_cur->bssid, ap_min->bssid, 6)
-								* lopt.sort_inv
-							< 0)
-							ap_min = ap_cur;
-						break;
-					case SORT_BY_POWER:
-						if ((ap_cur->avg_power - ap_min->avg_power)
-								* lopt.sort_inv
-							< 0)
-							ap_min = ap_cur;
-						break;
-					case SORT_BY_BEACON:
-						if ((ap_cur->nb_bcn < ap_min->nb_bcn) && lopt.sort_inv)
-							ap_min = ap_cur;
-						break;
-					case SORT_BY_DATA:
-						if ((ap_cur->nb_data < ap_min->nb_data)
-							&& lopt.sort_inv)
-							ap_min = ap_cur;
-						break;
-					case SORT_BY_PRATE:
-						if ((ap_cur->nb_dataps - ap_min->nb_dataps)
-								* lopt.sort_inv
-							< 0)
-							ap_min = ap_cur;
-						break;
-					case SORT_BY_CHAN:
-						if ((ap_cur->channel - ap_min->channel) * lopt.sort_inv
-							< 0)
-							ap_min = ap_cur;
-						break;
-					case SORT_BY_STAS:
-					{
-						int lhs_rank = ap_station_count_rank(ap_cur);
-						int rhs_rank = ap_station_count_rank(ap_min);
+					int lhs_rank = ap_station_count_rank(ap_cur);
+					int rhs_rank = ap_station_count_rank(ap_min);
 
-						if ((lhs_rank - rhs_rank) * lopt.sort_inv < 0)
-							ap_min = ap_cur;
-						break;
-					}
-					case SORT_BY_MBIT:
-						if ((ap_cur->max_speed - ap_min->max_speed)
-								* lopt.sort_inv
-							< 0)
-							ap_min = ap_cur;
-						break;
-					case SORT_BY_ENC:
-					{
-						int lhs_rank = ap_security_std_rank(ap_cur->security);
-						int rhs_rank = ap_security_std_rank(ap_min->security);
-
-						if ((lhs_rank - rhs_rank) * lopt.sort_inv < 0)
-							ap_min = ap_cur;
-						break;
-					}
-					case SORT_BY_CIPHER:
-					{
-						int lhs_rank = ap_security_cipher_rank(ap_cur->security);
-						int rhs_rank = ap_security_cipher_rank(ap_min->security);
-
-						if ((lhs_rank - rhs_rank) * lopt.sort_inv < 0)
-							ap_min = ap_cur;
-						break;
-					}
-					case SORT_BY_AUTH:
-					{
-						int lhs_rank = ap_security_auth_rank(ap_cur->security);
-						int rhs_rank = ap_security_auth_rank(ap_min->security);
-
-						if ((lhs_rank - rhs_rank) * lopt.sort_inv < 0)
-							ap_min = ap_cur;
-						break;
-					}
-					case SORT_BY_ESSID:
-						if (ap_essid_compare(ap_cur, ap_min) * lopt.sort_inv < 0)
-							ap_min = ap_cur;
-						break;
-					default: // sort by power
-						if (ap_cur->avg_power < ap_min->avg_power)
-							ap_min = ap_cur;
-						break;
+					if ((lhs_rank - rhs_rank) * lopt.sort_inv < 0)
+						ap_min = ap_cur;
+					break;
 				}
-				ap_cur = ap_cur->next;
+				case SORT_BY_MBIT:
+					if ((ap_cur->max_speed - ap_min->max_speed) * lopt.sort_inv
+						< 0)
+						ap_min = ap_cur;
+					break;
+				case SORT_BY_ENC:
+				{
+					int lhs_rank = ap_security_std_rank(ap_cur->security);
+					int rhs_rank = ap_security_std_rank(ap_min->security);
+
+					if ((lhs_rank - rhs_rank) * lopt.sort_inv < 0)
+						ap_min = ap_cur;
+					break;
+				}
+				case SORT_BY_CIPHER:
+				{
+					int lhs_rank = ap_security_cipher_rank(ap_cur->security);
+					int rhs_rank = ap_security_cipher_rank(ap_min->security);
+
+					if ((lhs_rank - rhs_rank) * lopt.sort_inv < 0)
+						ap_min = ap_cur;
+					break;
+				}
+				case SORT_BY_AUTH:
+				{
+					int lhs_rank = ap_security_auth_rank(ap_cur->security);
+					int rhs_rank = ap_security_auth_rank(ap_min->security);
+
+					if ((lhs_rank - rhs_rank) * lopt.sort_inv < 0)
+						ap_min = ap_cur;
+					break;
+				}
+				case SORT_BY_ESSID:
+					if (ap_essid_compare(ap_cur, ap_min) * lopt.sort_inv < 0)
+						ap_min = ap_cur;
+					break;
+				default: // sort by power
+					if (ap_cur->avg_power < ap_min->avg_power)
+						ap_min = ap_cur;
+					break;
 			}
+			ap_cur = ap_cur->next;
 		}
 
 		if (ap_min == lopt.ap_1st) lopt.ap_1st = ap_min->next;
@@ -4763,6 +4759,7 @@ static void reset_hopper_reject_state(void)
 	hopper_reject_is_freq = 0;
 	hopper_event_pending = 0;
 	hopper_refused_count = 0;
+	hopper_reject_notice_emitted = 0;
 }
 
 static void record_hopper_refused_target(int value, int is_freq)
@@ -4965,138 +4962,19 @@ static void update_hopper_reject_message(void)
 {
 	static sig_atomic_t last_seq = 0;
 	sig_atomic_t seq;
-	int card;
-	int value;
-	int is_freq;
-	int count;
-	int total;
-	int remaining;
-	int channel = 0;
-	char regdom[16];
-	char detail[sizeof(lopt.message)];
-	const char * ifname = "interface";
-	const char * status = "ref";
+	const char * notice = "One or more channels failed to tune. Check your regdom and press v to see which channels failed";
 
 	seq = hopper_reject_seq;
 	if (seq == 0 || seq == last_seq) return;
 
-	card = (int) hopper_reject_card;
-	value = (int) hopper_reject_value;
-	is_freq = (int) hopper_reject_is_freq;
-	count = (int) hopper_reject_count;
-	total = (int) hopper_reject_total;
 	last_seq = seq;
-	if (total < count)
-		total = count;
-	remaining = total - count;
-	if (remaining <= 0 && total > 0)
-		status = "blocked";
+	lopt.message[0] = '\0';
 
-	if (card >= 0 && g_wi != NULL && card < lopt.num_cards && g_wi[card] != NULL
-		&& wi_get_ifname(g_wi[card]) != NULL)
-		ifname = wi_get_ifname(g_wi[card]);
-
-	strlcpy(regdom, get_cached_regdom(0), sizeof(regdom));
-
-	if (is_freq)
+	if (!hopper_reject_notice_emitted)
 	{
-		channel = getChannelFromFrequency(value);
-		if (channel > 0)
-		{
-			snprintf(lopt.message,
-					 sizeof(lopt.message),
-					 "][ %s %d/%d ch%d %dMHz",
-					 status,
-					 count,
-					 total,
-					 channel,
-					 value);
-			snprintf(detail,
-					 sizeof(detail),
-					 "][ hopper warning: driver refused %s frequency %d MHz (ch %d) on %s; %d of %d scan target%s rejected, %d remain, regdom %s. Try b/B to switch band",
-					 band_mode_label(lopt.band_mode),
-					 value,
-					 channel,
-					 ifname,
-					 count,
-					 total,
-					 count == 1 ? "" : "s",
-					 remaining,
-					 regdom);
-		}
-		else
-		{
-			snprintf(lopt.message,
-					 sizeof(lopt.message),
-					 "][ %s %d/%d %dMHz",
-					 status,
-					 count,
-					 total,
-					 value);
-			snprintf(detail,
-					 sizeof(detail),
-					 "][ hopper warning: driver refused %s frequency %d MHz on %s; %d of %d scan target%s rejected, %d remain, regdom %s. Try b/B to switch band",
-					 band_mode_label(lopt.band_mode),
-					 value,
-					 ifname,
-					 count,
-					 total,
-					 count == 1 ? "" : "s",
-					 remaining,
-					 regdom);
-		}
+		append_tui_message_history(notice, time(NULL));
+		hopper_reject_notice_emitted = 1;
 	}
-	else
-	{
-		int frequency = channel_to_frequency(value);
-
-		if (frequency > 0)
-		{
-			snprintf(lopt.message,
-					 sizeof(lopt.message),
-					 "][ %s %d/%d ch%d %dMHz",
-					 status,
-					 count,
-					 total,
-					 value,
-					 frequency);
-			snprintf(detail,
-					 sizeof(detail),
-					 "][ hopper warning: driver refused %s channel %d (%d MHz) on %s; %d of %d scan target%s rejected, %d remain, regdom %s. Try b/B to switch band",
-					 band_mode_label(lopt.band_mode),
-					 value,
-					 frequency,
-					 ifname,
-					 count,
-					 total,
-					 count == 1 ? "" : "s",
-					 remaining,
-					 regdom);
-		}
-		else
-		{
-			snprintf(lopt.message,
-					 sizeof(lopt.message),
-					 "][ %s %d/%d ch%d",
-					 status,
-					 count,
-					 total,
-					 value);
-			snprintf(detail,
-					 sizeof(detail),
-					 "][ hopper warning: driver refused %s channel %d on %s; %d of %d scan target%s rejected, %d remain, regdom %s. Try b/B to switch band",
-					 band_mode_label(lopt.band_mode),
-					 value,
-					 ifname,
-					 count,
-					 total,
-					 count == 1 ? "" : "s",
-					 remaining,
-					 regdom);
-		}
-	}
-
-	append_tui_message_history(detail, time(NULL));
 }
 
 static void set_channel_entry_prompt(void)
@@ -5145,17 +5023,20 @@ static int get_active_phy_index(void)
 	return (-1);
 }
 
-static int get_kernel_regdom(char * out, size_t out_len)
+static int get_kernel_regdom(char * out, size_t out_len, int * self_managed)
 {
 	FILE * fp;
 	char line[256];
 	char global[16];
 	char phy_actual[16];
+	int phy_self_managed = 0;
 	int active_phy;
 	int current_phy = -2;
 
 	if (out == NULL || out_len == 0) return (0);
 	out[0] = '\0';
+	if (self_managed != NULL)
+		*self_managed = 0;
 	global[0] = '\0';
 	phy_actual[0] = '\0';
 	active_phy = get_active_phy_index();
@@ -5170,6 +5051,12 @@ static int get_kernel_regdom(char * out, size_t out_len)
 
 		while (isspace((unsigned char) *p))
 			p++;
+		if (strstr(p, "self-managed") != NULL)
+		{
+			if (current_phy == active_phy && self_managed != NULL)
+				*self_managed = 1;
+			phy_self_managed = 1;
+		}
 		if (strncmp(p, "global", 6) == 0)
 		{
 			current_phy = -1;
@@ -5190,13 +5077,23 @@ static int get_kernel_regdom(char * out, size_t out_len)
 			code[1] = (char) toupper((unsigned char) p[1]);
 			code[2] = '\0';
 			if (current_phy == active_phy)
+			{
 				strlcpy(phy_actual, code, sizeof(phy_actual));
+				if (self_managed != NULL && global[0] != '\0'
+					&& strcmp(code, global) != 0)
+					*self_managed = 1;
+				if (phy_self_managed && self_managed != NULL)
+					*self_managed = 1;
+			}
 			else if (current_phy == -1)
 				strlcpy(global, code, sizeof(global));
 		}
 	}
 
 	pclose(fp);
+	if (self_managed != NULL && phy_actual[0] != '\0' && global[0] != '\0'
+		&& strcmp(phy_actual, global) != 0)
+		*self_managed = 1;
 	if (phy_actual[0] != '\0')
 		strlcpy(out, phy_actual, out_len);
 	else if (global[0] != '\0')
@@ -5206,29 +5103,39 @@ static int get_kernel_regdom(char * out, size_t out_len)
 	return (1);
 }
 
-static void cache_kernel_regdom(const char * regdom)
+static void cache_kernel_regdom(const char * regdom, int self_managed)
 {
 	if (regdom == NULL || regdom[0] == '\0') return;
 	strlcpy(cached_regdom, regdom, sizeof(cached_regdom));
+	cached_regdom_self_managed = self_managed ? 1 : 0;
 	regdom_refresh_pending = 0;
 }
 
 static const char * get_cached_regdom(int force_refresh)
 {
 	char current[16];
+	int self_managed = 0;
 
 	if ((force_refresh || regdom_refresh_pending || cached_regdom[0] == '\0')
-		&& get_kernel_regdom(current, sizeof(current)))
+		&& get_kernel_regdom(current, sizeof(current), &self_managed))
 	{
-		cache_kernel_regdom(current);
+		cache_kernel_regdom(current, self_managed);
 	}
 	else if (force_refresh || regdom_refresh_pending)
 	{
 		regdom_refresh_pending = 0;
 	}
 	if (cached_regdom[0] == '\0')
+	{
 		strlcpy(cached_regdom, "unknown", sizeof(cached_regdom));
+		cached_regdom_self_managed = 0;
+	}
 	return (cached_regdom);
+}
+
+static int get_cached_regdom_self_managed(void)
+{
+	return (cached_regdom_self_managed != 0);
 }
 
 static void render_output(void)
@@ -5267,6 +5174,7 @@ static void render_output_view(int record_message_history)
 		view.band_label = band_mode_label(lopt.band_mode);
 		strlcpy(regdom_label, get_cached_regdom(0), sizeof(regdom_label));
 		view.regdom_label = regdom_label;
+		view.regdom_self_managed = get_cached_regdom_self_managed();
 		view.channel_status = channel_status;
 		view.channel_status_count = build_channel_status_entries(
 			channel_status,
@@ -5534,6 +5442,58 @@ static int ap_essid_compare(const struct AP_info * lhs, const struct AP_info * r
 	if (cmp != 0) return (cmp);
 
 	return (memcmp(lhs->bssid, rhs->bssid, 6));
+}
+
+static int ap_band_mode(const struct AP_info * ap)
+{
+	if (ap == NULL) return (0);
+
+	switch (ap->band)
+	{
+		case 24:
+			return (BAND_MODE_BG);
+		case 5:
+			return (BAND_MODE_A);
+		case 6:
+			return (BAND_MODE_AX);
+		default:
+			return (band_from_frequency_or_channel(0, ap->channel));
+	}
+}
+
+static int ensure_band_mode(int band_mode)
+{
+	int i;
+
+	if (band_mode <= 0 || band_mode == lopt.band_mode)
+		return (1);
+	if (!band_mode_is_supported(band_mode))
+	{
+		snprintf(lopt.message,
+				 sizeof(lopt.message),
+				 "][ %s is not supported by this card",
+				 band_mode_label(band_mode));
+		append_tui_message_history_now(lopt.message);
+		return (0);
+	}
+
+	for (i = 0; i < 3 && lopt.band_mode != band_mode; i++)
+	{
+		if (!switch_band(1))
+			return (0);
+	}
+
+	if (lopt.band_mode != band_mode)
+	{
+		snprintf(lopt.message,
+				 sizeof(lopt.message),
+				 "][ unable to switch to %s",
+				 band_mode_label(band_mode));
+		append_tui_message_history_now(lopt.message);
+		return (0);
+	}
+
+	return (1);
 }
 
 static char * csv_escape_field(const unsigned char * input, size_t len)
@@ -5943,8 +5903,13 @@ static int handle_mouse_event(void)
 	sort_by = airodump_tui_ap_sort_field_from_mouse(&tui_state, event.x, event.y);
 	if (sort_by != SORT_BY_NOTHING)
 	{
+		int old_sort_by = lopt.sort_by;
+
 		lopt.sort_by = sort_by;
-		lopt.sort_inv *= -1;
+		if (old_sort_by == sort_by)
+			lopt.sort_inv *= -1;
+		else
+			lopt.sort_inv = 1;
 		if (lopt.sort_inv < 0) lopt.sort_inv = -1;
 		else lopt.sort_inv = 1;
 		ALLEGE(pthread_mutex_lock(&(lopt.mx_sort)) == 0);
@@ -6157,8 +6122,13 @@ static int handle_keycode(int keycode)
 		}
 		else
 		{
+			int old_sort_by = lopt.sort_by;
+
 			lopt.sort_by = cycle_ap_sort_field(lopt.sort_by, direction);
-			lopt.sort_inv *= -1;
+			if (old_sort_by == lopt.sort_by)
+				lopt.sort_inv *= -1;
+			else
+				lopt.sort_inv = 1;
 			if (lopt.sort_inv == 0) lopt.sort_inv = 1;
 			ALLEGE(pthread_mutex_lock(&(lopt.mx_sort)) == 0);
 			dump_sort();
@@ -8359,15 +8329,39 @@ channel_hopper(struct wif * wi[], int if_num, int chan_count, pid_t parent)
 
 			ch = lopt.channels[ch_idx];
 
+			if (
 #ifdef CONFIG_LIBNL
-			if (wi_set_ht_channel(wi[card], ch, lopt.htval) == 0)
+				wi_set_ht_channel(wi[card], ch, lopt.htval)
 #else
-			if (wi_set_channel(wi[card], ch) == 0)
+				wi_set_channel(wi[card], ch)
 #endif
+				== 0)
 			{
-				lopt.channel[card] = ch;
-				if (lopt.active_scan_sim > 0) send_probe_request(wi[card]);
-				report_hopper_update(parent, card, ch);
+				int effective = wi_get_channel(wi[card]);
+
+				if (effective != ch)
+				{
+					usleep(10000);
+					effective = wi_get_channel(wi[card]);
+				}
+
+				if (effective == ch)
+				{
+					lopt.channel[card] = ch;
+					lopt.frequency[card] = channel_to_frequency_for_band_mode(
+						lopt.band_mode,
+						ch);
+					if (lopt.active_scan_sim > 0) send_probe_request(wi[card]);
+					report_hopper_update(parent, card, ch);
+				}
+				else
+				{
+					report_hopper_update(parent, card, -ch);
+					lopt.channels[ch_idx] = -1; /* remove invalid channel */
+					j--;
+					cai--;
+					continue;
+				}
 			}
 			else
 			{
@@ -8607,6 +8601,31 @@ static int channel_to_frequency(int channel)
 	return (channel_to_frequency_ax(channel));
 }
 
+static int channel_to_frequency_for_band_mode(int band_mode, int channel)
+{
+	int i;
+
+	switch (band_mode)
+	{
+		case BAND_MODE_BG:
+			for (i = 0; channel_frequency_map_bg[i] != -1; i += 2)
+				if (channel_frequency_map_bg[i] == channel)
+					return (channel_frequency_map_bg[i + 1]);
+			break;
+		case BAND_MODE_A:
+			for (i = 0; channel_frequency_map_a[i] != -1; i += 2)
+				if (channel_frequency_map_a[i] == channel)
+					return (channel_frequency_map_a[i + 1]);
+			break;
+		case BAND_MODE_AX:
+			return (channel_to_frequency_ax(channel));
+		default:
+			break;
+	}
+
+	return (channel_to_frequency(channel));
+}
+
 static int frequency_to_channel(int frequency)
 {
 	int channel = getChannelFromFrequency(frequency);
@@ -8677,6 +8696,7 @@ static int park_on_channel(int channel)
 	struct wif * wi[MAX_CARDS];
 	int i;
 	int freq;
+	int hopper_was_running;
 
 	if (g_wi == NULL || g_wi[0] == NULL)
 	{
@@ -8703,11 +8723,12 @@ static int park_on_channel(int channel)
 	for (i = 0; i < lopt.num_cards; i++)
 		wi[i] = g_wi[i];
 
+	hopper_was_running = (hopper_pid > 0);
 	stop_hopper();
 
 	if (lopt.freqoption)
 	{
-		freq = channel_to_frequency(channel);
+		freq = channel_to_frequency_for_band_mode(lopt.band_mode, channel);
 		if (freq <= 0)
 		{
 			snprintf(lopt.message,
@@ -8715,6 +8736,7 @@ static int park_on_channel(int channel)
 					 "][ unable to map channel %d to a frequency",
 					 channel);
 			append_tui_message_history_now(lopt.message);
+			if (hopper_was_running) resume_hopper();
 			return (0);
 		}
 
@@ -8729,6 +8751,7 @@ static int park_on_channel(int channel)
 						 "][ failed to tune to channel %d",
 						 channel);
 				append_tui_message_history_now(lopt.message);
+				if (hopper_was_running) resume_hopper();
 				return (0);
 			}
 #else
@@ -8739,6 +8762,7 @@ static int park_on_channel(int channel)
 						 "][ failed to tune to channel %d",
 						 channel);
 				append_tui_message_history_now(lopt.message);
+				if (hopper_was_running) resume_hopper();
 				return (0);
 			}
 #endif
@@ -8751,6 +8775,9 @@ static int park_on_channel(int channel)
 	{
 		for (i = 0; i < lopt.num_cards; i++)
 		{
+			int channel_freq = channel_to_frequency_for_band_mode(lopt.band_mode,
+																channel);
+
 #ifdef CONFIG_LIBNL
 			if (wi_set_ht_channel(wi[i], channel, lopt.htval) != 0)
 			{
@@ -8759,6 +8786,7 @@ static int park_on_channel(int channel)
 						 "][ failed to tune to channel %d",
 						 channel);
 				append_tui_message_history_now(lopt.message);
+				if (hopper_was_running) resume_hopper();
 				return (0);
 			}
 #else
@@ -8769,10 +8797,12 @@ static int park_on_channel(int channel)
 						 "][ failed to tune to channel %d",
 						 channel);
 				append_tui_message_history_now(lopt.message);
+				if (hopper_was_running) resume_hopper();
 				return (0);
 			}
 #endif
 			lopt.channel[i] = channel;
+			lopt.frequency[i] = channel_freq;
 		}
 		lopt.singlechan = 1;
 		lopt.singlefreq = 0;
@@ -8824,7 +8854,7 @@ static int apply_channel_entry(void)
 	if (!park_on_channel(channel))
 		return (0);
 
-	frequency = channel_to_frequency(channel);
+	frequency = channel_to_frequency_for_band_mode(lopt.band_mode, channel);
 	snprintf(lopt.message,
 			 sizeof(lopt.message),
 			 "][ channel %d selected (%d MHz)",
@@ -8837,16 +8867,22 @@ static int apply_channel_entry(void)
 static int lock_selected_ap_channel(void)
 {
 	struct AP_info * ap_cur;
+	int ap_band_mode_value;
 
 	ap_cur = lopt.p_selected_ap;
 	if (ap_cur == NULL || ap_cur->channel <= 0)
+		return (0);
+
+	ap_band_mode_value = ap_band_mode(ap_cur);
+	if (!ensure_band_mode(ap_band_mode_value))
 		return (0);
 
 	if (!park_on_channel(ap_cur->channel))
 		return (0);
 
 	{
-		int frequency = channel_to_frequency(ap_cur->channel);
+		int frequency = channel_to_frequency_for_band_mode(ap_band_mode_value,
+															ap_cur->channel);
 
 		if (frequency > 0)
 		{
@@ -9827,6 +9863,9 @@ static int check_channel(struct wif * wi[], int cards)
 #else
 			wi_set_channel(wi[i], lopt.channel[i]);
 #endif
+			lopt.channel[i] = chan;
+			lopt.frequency[i] = channel_to_frequency_for_band_mode(lopt.band_mode,
+																	chan);
 		}
 	}
 	return (0);
@@ -9848,6 +9887,8 @@ static int check_frequency(struct wif * wi[], int cards)
 					 wi_get_ifname(wi[i]),
 					 freq);
 			wi_set_freq(wi[i], lopt.frequency[i]);
+			lopt.frequency[i] = freq;
+			lopt.channel[i] = frequency_to_channel(freq);
 		}
 	}
 	return (0);
@@ -11420,7 +11461,7 @@ int main(int argc, char * argv[])
 		{
 			if (ap_sort_is_live(lopt.sort_by))
 			{
-				/* sort the APs by power */
+				/* refresh live AP sort order */
 				ALLEGE(pthread_mutex_lock(&(lopt.mx_sort)) == 0);
 				dump_sort();
 				ALLEGE(pthread_mutex_unlock(&(lopt.mx_sort)) == 0);

@@ -111,7 +111,7 @@ struct ap_header_span
 
 static const struct ap_header_field ap_header_fields[] = {
 	{ SORT_BY_BSSID, "BSSID", 17, 0, 1 },
-	{ SORT_BY_POWER, "PWR", 3, 1, 2 },
+	{ SORT_BY_POWER, "PWR", 4, 1, 2 },
 	{ SORT_BY_BEACON, "Beacons", 8, 1, 2 },
 	{ SORT_BY_DATA, "#Data", 8, 1, 2 },
 	{ SORT_BY_PRATE, "#/s", 4, 1, 2 },
@@ -184,7 +184,7 @@ static const struct station_header_field station_header_fields[] = {
 	{ STATION_HEADER_STATION, STA_SORT_BY_STATION, "STATION", 17, 0, 2 },
 	{ STATION_HEADER_BAND, STA_SORT_BY_BAND, "Band", 4, 0, 2 },
 	{ STATION_HEADER_LA, STA_SORT_BY_LA, "LA", 2, 0, 2 },
-	{ STATION_HEADER_POWER, STA_SORT_BY_POWER, "PWR", 3, 1, 2 },
+	{ STATION_HEADER_POWER, STA_SORT_BY_POWER, "PWR", 4, 1, 2 },
 	{ STATION_HEADER_RATE, STA_SORT_BY_RATE, "Rate", 7, 0, 2 },
 	{ STATION_HEADER_LOST, STA_SORT_BY_LOST, "Lost", 4, 0, 2 },
 	{ STATION_HEADER_FRAMES, STA_SORT_BY_FRAMES, "Frames", 8, 0, 2 },
@@ -923,7 +923,7 @@ static void append_ap_core_columns(char * line,
 								   const char * auth)
 {
 	append_padded_column(line, line_size, used, bssid, 17, 0, 1);
-	append_padded_column(line, line_size, used, power, 3, 1, 2);
+	append_padded_column(line, line_size, used, power, 4, 1, 2);
 	append_padded_column(line, line_size, used, beacons, 8, 1, 2);
 	append_padded_column(line, line_size, used, data, 8, 1, 2);
 	append_padded_column(line, line_size, used, rate, 4, 1, 2);
@@ -1745,7 +1745,12 @@ static void render_header_line(const struct airodump_tui_view * view)
 	if (view->band_label != NULL)
 		append_linef(line, sizeof(line), &used, " [Band: %s]", view->band_label);
 	if (view->regdom_label != NULL)
-		append_linef(line, sizeof(line), &used, " [Regdom: %s]", view->regdom_label);
+		append_linef(line,
+					 sizeof(line),
+					 &used,
+					 " [Regdom: %s%s]",
+					 view->regdom_label,
+					 view->regdom_self_managed ? "*" : "");
 
 	if (view->batt != NULL && strcmp(view->batt, "]") != 0)
 		append_linef(line, sizeof(line), &used, " %s", view->batt);
@@ -1923,6 +1928,7 @@ static void render_channel_overlay(const struct airodump_tui_state * state,
 	int col_width = 19;
 	int i;
 	char title[128];
+	char regdom_title[64];
 
 	if (view == NULL || view->channel_status == NULL
 		|| view->channel_status_count == 0)
@@ -1950,10 +1956,16 @@ static void render_channel_overlay(const struct airodump_tui_state * state,
 	}
 	attroff(A_REVERSE);
 
+	snprintf(regdom_title,
+			 sizeof(regdom_title),
+			 "Regdom: %s%s",
+			 view->regdom_label != NULL ? view->regdom_label : "unknown",
+			 view->regdom_self_managed ? " (device-managed)" : "");
 	snprintf(title,
 			 sizeof(title),
-			 " Channels: %s ",
-			 view->band_label != NULL ? view->band_label : "band");
+			 " Channels: %s | %s ",
+			 view->band_label != NULL ? view->band_label : "band",
+			 regdom_title);
 	render_ascii_box(top, left, box_height, box_width, title);
 	mvaddnstr(top + 1,
 			  left + 2,

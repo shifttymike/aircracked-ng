@@ -109,6 +109,7 @@ struct airodump_tui_view
 	int show_ax_channels;
 	const char * band_label;
 	const char * regdom_label;
+	int regdom_self_managed;
 	const struct airodump_tui_channel_entry * channel_status;
 	size_t channel_status_count;
 	int num_cards;
