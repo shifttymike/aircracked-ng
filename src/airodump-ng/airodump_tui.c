@@ -12,9 +12,7 @@
 #include <time.h>
 #include <unistd.h>
 
-#ifdef HAVE_NCURSES
 #include <ncurses.h>
-#endif
 
 #include "airodump_tui.h"
 #include "aircrack-ng/crypto/crypto.h"
@@ -25,7 +23,6 @@
 
 extern int is_filtered_essid(const uint8_t * essid);
 
-#ifdef HAVE_NCURSES
 static long long station_age_seconds(const struct ST_info * st);
 static int station_is_locally_administered(const struct ST_info * st);
 static int station_band_value(const struct ST_info * st);
@@ -2266,11 +2263,7 @@ int airodump_tui_available(void)
 	{
 		return (0);
 	}
-#ifndef HAVE_NCURSES
-	return (0);
-#else
 	return (1);
-#endif
 }
 
 static void maybe_adjust_ghostty_term(void)
@@ -2701,30 +2694,3 @@ void airodump_tui_render(struct airodump_tui_state * state,
 	free(ap_rows);
 	free(st_rows);
 }
-
-#else
-#ifndef ERR
-#define ERR (-1)
-#endif
-int airodump_tui_available(void) { return (0); }
-int airodump_tui_start(struct airodump_tui_state * state)
-{
-	UNUSED_PARAM(state);
-	return (0);
-}
-void airodump_tui_stop(struct airodump_tui_state * state)
-{
-	UNUSED_PARAM(state);
-}
-int airodump_tui_getch(struct airodump_tui_state * state)
-{
-	UNUSED_PARAM(state);
-	return (ERR);
-}
-void airodump_tui_render(struct airodump_tui_state * state,
-						 const struct airodump_tui_view * view)
-{
-	UNUSED_PARAM(state);
-	UNUSED_PARAM(view);
-}
-#endif

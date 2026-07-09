@@ -5,9 +5,7 @@
 #include <stddef.h>
 #include <time.h>
 
-#ifdef HAVE_NCURSES
 #include <ncurses.h>
-#endif
 
 #define STA_SORT_BY_NOTHING 0
 #define STA_SORT_BY_BSSID 1

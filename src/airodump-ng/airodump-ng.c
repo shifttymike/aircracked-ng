@@ -113,7 +113,6 @@ static const char * OUI_PATHS[]
 
 static int read_pkts = 0;
 static int colors_enabled = 0;
-static int force_legacy_ui = 0;
 
 struct probe_log_entry
 {
@@ -1326,11 +1325,6 @@ static int launch_deauth(void)
 			 station_count,
 			 (station_count == 1) ? "" : "s");
 	append_tui_message_history_now(lopt.message);
-	if (!use_ncurses_tui)
-	{
-		printf("%s\n", lopt.message);
-		fflush(stdout);
-	}
 	launched_any = 1;
 
 	st_cur = lopt.st_1st;
@@ -1347,11 +1341,6 @@ static int launch_deauth(void)
 					 "][ aireplay-ng %s",
 					 stmac);
 			append_tui_message_history_now(lopt.message);
-			if (!use_ncurses_tui)
-			{
-				printf("%s\n", lopt.message);
-				fflush(stdout);
-			}
 
 			if (pipe(pipefd) < 0)
 			{
@@ -1433,15 +1422,7 @@ static int launch_deauth(void)
 							if (line_len > 0)
 							{
 								line_buf[line_len] = '\0';
-								if (use_ncurses_tui)
-								{
-									append_tui_message_history_now(line_buf);
-								}
-								else
-								{
-									printf("%s\n", line_buf);
-									fflush(stdout);
-								}
+								append_tui_message_history_now(line_buf);
 								line_len = 0;
 							}
 							continue;
@@ -1450,15 +1431,7 @@ static int launch_deauth(void)
 						if (line_len + 1 >= sizeof(line_buf))
 						{
 							line_buf[line_len] = '\0';
-							if (use_ncurses_tui)
-							{
-								append_tui_message_history_now(line_buf);
-							}
-							else
-							{
-								printf("%s\n", line_buf);
-								fflush(stdout);
-							}
+							append_tui_message_history_now(line_buf);
 							line_len = 0;
 						}
 
@@ -1469,15 +1442,7 @@ static int launch_deauth(void)
 				if (line_len > 0)
 				{
 					line_buf[line_len] = '\0';
-					if (use_ncurses_tui)
-					{
-						append_tui_message_history_now(line_buf);
-					}
-					else
-					{
-						printf("%s\n", line_buf);
-						fflush(stdout);
-					}
+					append_tui_message_history_now(line_buf);
 				}
 			}
 
@@ -1496,11 +1461,6 @@ restore_state:
 			 sizeof(lopt.message),
 			 "][ deauth complete");
 	append_tui_message_history_now(lopt.message);
-	if (!use_ncurses_tui)
-	{
-		printf("%s\n", lopt.message);
-		fflush(stdout);
-	}
 
 	lopt.singlechan = lopt.freqoption ? 0 : 1;
 	lopt.singlefreq = lopt.freqoption ? 1 : 0;
@@ -1754,7 +1714,6 @@ static const char usage[] =
 	"                              pcap, ivs, csv, gps, kismet, netxml, "
 	"logcsv\n"
 	"      -P / --probes         : Log probe sightings to a live CSV file\n"
-	"      --legacy-ui           : Force the legacy text UI instead of ncurses\n"
 	"      --ignore-negative-one : Removes the message that says\n"
 	"                              fixed channel <interface>: -1\n"
 	"      --write-interval\n"
@@ -5421,8 +5380,6 @@ static void cycle_tui_focus(int direction)
 
 static void set_tui_focus(int focus)
 {
-#ifdef HAVE_NCURSES
-	if (!use_ncurses_tui) return;
 	if (tui_message_pane_visible())
 	{
 		if (focus < 0) focus = 0;
@@ -5438,9 +5395,6 @@ static void set_tui_focus(int focus)
 		focus = (lopt.show_sta == 1) ? 1 : 0;
 	}
 	tui_state.focus = focus;
-#else
-	UNUSED_PARAM(focus);
-#endif
 }
 
 static void set_selected_ap(struct AP_info * ap, int selection_direction)
@@ -5999,14 +5953,12 @@ static struct AP_info * pick_ap_from_mouse(int x, int y)
 
 static int handle_mouse_event(void)
 {
-#ifdef HAVE_NCURSES
 	MEVENT event;
 	struct AP_info * ap_hit;
 	int target_focus;
 	int redraw = 0;
 	int sort_by;
 
-	if (!use_ncurses_tui) return (0);
 	if (getmouse(&event) != OK) return (0);
 
 	if (event.bstate & BUTTON_SHIFT)
@@ -6244,14 +6196,14 @@ static int handle_keycode(int keycode)
 		goto done;
 	}
 
-	if (use_ncurses_tui && tui_state.help_visible)
+	if (tui_state.help_visible)
 	{
 		tui_state.help_visible = 0;
 		redraw = 1;
 		goto done;
 	}
 
-	if (use_ncurses_tui && tui_state.channel_overlay_visible)
+	if (tui_state.channel_overlay_visible)
 	{
 		if (keycode == 'v' || keycode == 27 || keycode == KEY_ESCAPE)
 		{
@@ -6266,23 +6218,17 @@ static int handle_keycode(int keycode)
 
 	if (keycode == '?' || keycode == KEY_F(1))
 	{
-		if (use_ncurses_tui)
-		{
-			tui_state.help_visible = !tui_state.help_visible;
-			tui_state.channel_overlay_visible = 0;
-			redraw = 1;
-		}
+		tui_state.help_visible = !tui_state.help_visible;
+		tui_state.channel_overlay_visible = 0;
+		redraw = 1;
 		goto done;
 	}
 
 	if (keycode == 'v')
 	{
-		if (use_ncurses_tui)
-		{
-			tui_state.channel_overlay_visible = !tui_state.channel_overlay_visible;
-			tui_state.help_visible = 0;
-			redraw = 1;
-		}
+		tui_state.channel_overlay_visible = !tui_state.channel_overlay_visible;
+		tui_state.help_visible = 0;
+		redraw = 1;
 		goto done;
 	}
 
@@ -6302,16 +6248,11 @@ static int handle_keycode(int keycode)
 
 	if (keycode == KEY_o)
 	{
-		if (use_ncurses_tui)
-			tui_state.colors_enabled = !tui_state.colors_enabled;
-		else if (colors_enabled)
-			color_off();
-		else
-			color_on();
+		tui_state.colors_enabled = !tui_state.colors_enabled;
 		snprintf(lopt.message,
 				 sizeof(lopt.message),
 				 "][ color %s",
-				 (use_ncurses_tui ? tui_state.colors_enabled : colors_enabled) ? "on" : "off");
+				 tui_state.colors_enabled ? "on" : "off");
 		redraw = 1;
 	}
 
@@ -6397,15 +6338,12 @@ static int handle_keycode(int keycode)
 
 	if (keycode == 'M')
 	{
-		if (use_ncurses_tui)
-		{
-			airodump_tui_set_mouse_enabled(&tui_state, !tui_state.mouse_enabled);
-			snprintf(lopt.message,
-					 sizeof(lopt.message),
-					 "][ mouse capture %s",
-					 tui_state.mouse_enabled ? "enabled" : "disabled");
-			redraw = 1;
-		}
+		airodump_tui_set_mouse_enabled(&tui_state, !tui_state.mouse_enabled);
+		snprintf(lopt.message,
+				 sizeof(lopt.message),
+				 "][ mouse capture %s",
+				 tui_state.mouse_enabled ? "enabled" : "disabled");
+		redraw = 1;
 	}
 
 	if (keycode == 't')
@@ -6486,157 +6424,48 @@ static int handle_keycode(int keycode)
 		}
 	}
 
-	if (keycode == KEY_ARROW_DOWN)
-	{
-		if (!use_ncurses_tui && tui_state.focus == 1)
-		{
-			tui_state.sta_scroll++;
-			redraw = 1;
-		}
-		else if (!use_ncurses_tui && tui_state.focus == 2)
-		{
-			tui_state.msg_scroll++;
-			if ((size_t) tui_state.msg_scroll
-				>= (tui_message_history_count > (size_t) tui_state.msg_visible_rows
-						? tui_message_history_count - (size_t) tui_state.msg_visible_rows
-						: 0))
-				set_message_follow_latest(1);
-			else
-				set_message_follow_latest(0);
-			redraw = 1;
-		}
-		else if (!use_ncurses_tui && lopt.p_selected_ap && lopt.p_selected_ap->prev)
-		{
-			set_selected_ap(lopt.p_selected_ap->prev, selection_direction_down);
-			redraw = 1;
-		}
-	}
-
-	if (keycode == KEY_ARROW_UP)
-	{
-		if (!use_ncurses_tui && tui_state.focus == 1)
-		{
-			if (tui_state.sta_scroll > 0) tui_state.sta_scroll--;
-			redraw = 1;
-		}
-		else if (!use_ncurses_tui && tui_state.focus == 2)
-		{
-			if (tui_state.msg_scroll > 0) tui_state.msg_scroll--;
-			set_message_follow_latest(0);
-			redraw = 1;
-		}
-		else if (!use_ncurses_tui && lopt.p_selected_ap && lopt.p_selected_ap->next)
-		{
-			set_selected_ap(lopt.p_selected_ap->next, selection_direction_up);
-			redraw = 1;
-		}
-	}
-
 	if (keycode == KEY_TAB)
 	{
-		if (use_ncurses_tui)
-		{
-			cycle_tui_focus(1);
-			redraw = 1;
-		}
-		else if (lopt.p_selected_ap == NULL)
-		{
-			set_selected_ap(lopt.ap_end, selection_direction_down);
-			snprintf(lopt.message,
-					 sizeof(lopt.message),
-					 "][ enabled AP selection");
-			lopt.sort_by = SORT_BY_NOTHING;
-			redraw = 1;
-		}
-		else
-		{
-			set_selected_ap(NULL, selection_direction_no);
-			lopt.sort_by = SORT_BY_NOTHING;
-			snprintf(lopt.message,
-					 sizeof(lopt.message),
-					 "][ disabled selection");
-			redraw = 1;
-		}
+		cycle_tui_focus(1);
+		redraw = 1;
 	}
 
 	if (keycode == KEY_a)
 	{
-		if (use_ncurses_tui)
-		{
-			if (lopt.show_ap == 1 && lopt.show_sta == 1)
-			{
-				lopt.show_sta = 0;
-				tui_state.focus = 0;
-				snprintf(lopt.message, sizeof(lopt.message), "][ display ap only");
-			}
-			else if (lopt.show_ap == 1 && lopt.show_sta == 0)
-			{
-				lopt.show_ap = 0;
-				lopt.show_sta = 1;
-				tui_state.focus = 1;
-				snprintf(lopt.message, sizeof(lopt.message), "][ display sta only");
-			}
-			else
-			{
-				lopt.show_ap = 1;
-				lopt.show_sta = 1;
-				tui_state.focus = 0;
-				snprintf(lopt.message, sizeof(lopt.message), "][ display ap+sta");
-			}
-			redraw = 1;
-		}
-		else if (lopt.show_ap == 1 && lopt.show_sta == 1 && lopt.show_ack == 0)
-		{
-			lopt.show_ack = 1;
-			snprintf(lopt.message, sizeof(lopt.message), "][ display ap+sta+ack");
-			redraw = 1;
-		}
-		else if (lopt.show_ap == 1 && lopt.show_sta == 1 && lopt.show_ack == 1)
+		if (lopt.show_ap == 1 && lopt.show_sta == 1)
 		{
 			lopt.show_sta = 0;
-			lopt.show_ack = 0;
+			tui_state.focus = 0;
 			snprintf(lopt.message, sizeof(lopt.message), "][ display ap only");
-			redraw = 1;
 		}
-		else if (lopt.show_ap == 1 && lopt.show_sta == 0 && lopt.show_ack == 0)
+		else if (lopt.show_ap == 1 && lopt.show_sta == 0)
 		{
 			lopt.show_ap = 0;
 			lopt.show_sta = 1;
+			tui_state.focus = 1;
 			snprintf(lopt.message, sizeof(lopt.message), "][ display sta only");
-			redraw = 1;
-		}
-		else if (lopt.show_ap == 0 && lopt.show_sta == 1 && lopt.show_ack == 0)
-		{
-			lopt.show_ap = 1;
-			snprintf(lopt.message, sizeof(lopt.message), "][ display ap+sta");
-			redraw = 1;
-		}
-	}
-
-	if (keycode == KEY_c)
-	{
-		if (use_ncurses_tui)
-		{
-			set_selected_ap(NULL, selection_direction_no);
-			tui_state.ap_scroll = 0;
-			tui_state.sta_scroll = 0;
-			tui_state.msg_scroll = 0;
-			tui_state.focus = 0;
 		}
 		else
 		{
-			resetSelection();
-			snprintf(lopt.message,
-					 sizeof(lopt.message),
-					 "][ reset selection to default");
+			lopt.show_ap = 1;
+			lopt.show_sta = 1;
+			tui_state.focus = 0;
+			snprintf(lopt.message, sizeof(lopt.message), "][ display ap+sta");
 		}
 		redraw = 1;
 	}
 
-done:
+	if (keycode == KEY_c)
+	{
+		set_selected_ap(NULL, selection_direction_no);
+		tui_state.ap_scroll = 0;
+		tui_state.sta_scroll = 0;
+		tui_state.msg_scroll = 0;
+		tui_state.focus = 0;
+		redraw = 1;
+	}
 
-#ifdef HAVE_NCURSES
-	if (use_ncurses_tui)
+done:
 	{
 		if (keycode == KEY_LEFT)
 		{
@@ -6796,8 +6625,6 @@ done:
 			redraw = 1;
 		}
 	}
-#endif
-
 	return (redraw);
 }
 
@@ -8312,11 +8139,6 @@ static void sighandler(int signum)
 		if (getpid() != main_pid)
 			_exit(0);
 		lopt.do_exit = 1;
-		if (!use_ncurses_tui)
-		{
-			show_cursor();
-			reset_term();
-		}
 		fprintf(stdout, "Quitting...\n");
 	}
 
@@ -8325,7 +8147,6 @@ static void sighandler(int signum)
 		fprintf(stderr,
 				"Caught signal 11 (SIGSEGV). Please"
 				" contact the author!\n\n");
-		if (!use_ncurses_tui) show_cursor();
 		fflush(stdout);
 		exit(1);
 	}
@@ -8335,7 +8156,6 @@ static void sighandler(int signum)
 		fprintf(stdout,
 				"Caught signal 14 (SIGALRM). Please"
 				" contact the author!\n\n");
-		if (!use_ncurses_tui) show_cursor();
 		_exit(1);
 	}
 
@@ -8343,13 +8163,7 @@ static void sighandler(int signum)
 
 	if (signum == SIGWINCH)
 	{
-		if (use_ncurses_tui)
-			tui_resize_pending = 1;
-		else
-		{
-			erase_display(0);
-			fflush(stdout);
-		}
+		tui_resize_pending = 1;
 	}
 }
 
@@ -10355,7 +10169,6 @@ int main(int argc, char * argv[])
 		   {"target", 1, 0, 'z'},
 		   {"tcp-server", 1, 0, 'V'},
 		   {"probes", 0, 0, 'P'},
-		   {"legacy-ui", 0, 0, 'L'},
 		   {"ax40", 0, 0, '4'},
 		   {"ax80", 0, 0, '8'},
 		   {"ax80+", 0, 0, '9'},
@@ -10841,10 +10654,6 @@ int main(int argc, char * argv[])
 
 				opt.record_data = 1;
 				opt.output_format_probes = 1;
-				break;
-
-			case 'L':
-				force_legacy_ui = 1;
 				break;
 
 			case 'i':
@@ -11633,16 +11442,13 @@ int main(int argc, char * argv[])
 		waitpid(-1, NULL, WNOHANG);
 	}
 
-	if (!force_legacy_ui)
-		use_ncurses_tui = airodump_tui_start(&tui_state);
-	else
-		use_ncurses_tui = 0;
-	(void) atexit(restore_terminal);
-	if (!use_ncurses_tui)
+	if (!airodump_tui_start(&tui_state))
 	{
-		hide_cursor();
-		erase_display(2);
+		fprintf(stderr, "ncurses TUI is required but could not be started.\n");
+		return (EXIT_FAILURE);
 	}
+	use_ncurses_tui = 1;
+	(void) atexit(restore_terminal);
 
 	start_time = time(NULL);
 	tt1 = time(NULL);

@@ -153,21 +153,14 @@ AIRCRACK_NG_PCRE
 AIRCRACK_NG_RFKILL
 AIRCRACK_NG_SQLITE
 AIRCRACK_NG_ZLIB
-PKG_CHECK_MODULES([NCURSES], [ncursesw], [
-		NCURSES_FOUND=yes
-		AC_SUBST([NCURSES_CFLAGS])
-		AC_SUBST([NCURSES_LIBS])
-	], [
-		PKG_CHECK_MODULES([NCURSES], [ncurses], [
-			NCURSES_FOUND=yes
-			AC_SUBST([NCURSES_CFLAGS])
-			AC_SUBST([NCURSES_LIBS])
-		], [NCURSES_FOUND=no])
+PKG_CHECK_MODULES([NCURSES], [ncursesw], [have_ncurses=yes], [
+		PKG_CHECK_MODULES([NCURSES], [ncurses], [have_ncurses=yes], [have_ncurses=no])
 	])
-AM_CONDITIONAL([HAVE_NCURSES], [test "$NCURSES_FOUND" = yes])
-AS_IF([test "$NCURSES_FOUND" = yes], [
-	AC_DEFINE([HAVE_NCURSES], [1], [Define to 1 if ncurses is available])
+AS_IF([test "$have_ncurses" != yes], [
+	AC_MSG_ERROR([ncurses (ncursesw or ncurses) is required to build airodump-ng TUI])
 ])
+AM_CONDITIONAL([HAVE_NCURSES], [true])
+AC_DEFINE([HAVE_NCURSES], [1], [Define to 1 if ncurses is available])
 PKG_CHECK_MODULES([CMOCKA], [cmocka], [
 		CMOCKA_FOUND=yes
 		AC_SUBST([CMOCKA_CFLAGS])
@@ -341,7 +334,7 @@ ${PACKAGE} ${VERSION}
     Jemalloc:                    ${JEMALLOC}
     Pcap:                        ${PCAP_FOUND}
     Pcre:                        ${HAVE_PCRE}
-    Ncurses:                     ${NCURSES_FOUND}
+    Ncurses:                     ${have_ncurses}
     Sqlite:                      ${HAVE_SQLITE3}
     Tcmalloc:                    ${TCMALLOC}
     Zlib:                        ${HAVE_ZLIB}
