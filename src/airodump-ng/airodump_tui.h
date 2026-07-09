@@ -138,5 +138,7 @@ int airodump_tui_ap_sort_field_from_mouse(const struct airodump_tui_state * stat
 int airodump_tui_station_sort_field_from_mouse(const struct airodump_tui_state * state,
 											   int x,
 											   int y);
+int airodump_tui_cycle_ap_sort_field(int sort_by, int direction);
+int airodump_tui_cycle_station_sort_field(int sort_by, int direction);
 
 #endif

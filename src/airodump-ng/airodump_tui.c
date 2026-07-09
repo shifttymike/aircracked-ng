@@ -118,11 +118,84 @@ static const struct ap_header_field ap_header_fields[] = {
 	{ SORT_BY_CHAN, "CH", 3, 1, 2 },
 	{ -1, "Band", 4, 0, 2 },
 	{ SORT_BY_STAS, "STAs", 11, 1, 2 },
+	{ SORT_BY_MBIT, "Mbit", 5, 1, 2 },
 	{ SORT_BY_ENC, "ENC", 6, 0, 1 },
 	{ SORT_BY_CIPHER, "CIPHER", 7, 0, 1 },
 	{ SORT_BY_AUTH, "AUTH", 7, 0, 1 },
 	{ SORT_BY_ESSID, "ESSID", 0, 0, 2 },
 };
+
+static const int ap_sort_cycle_fields[] = {
+	SORT_BY_BSSID,
+	SORT_BY_POWER,
+	SORT_BY_BEACON,
+	SORT_BY_DATA,
+	SORT_BY_PRATE,
+	SORT_BY_CHAN,
+	SORT_BY_STAS,
+	SORT_BY_MBIT,
+	SORT_BY_ENC,
+	SORT_BY_CIPHER,
+	SORT_BY_AUTH,
+	SORT_BY_ESSID,
+};
+
+static int bssid_palette_extended = 0;
+static const short bssid_palette_fallback_fg_colors[24]
+	= { COLOR_RED,
+		COLOR_GREEN,
+		COLOR_YELLOW,
+		COLOR_BLUE,
+		COLOR_MAGENTA,
+		COLOR_CYAN,
+		9,
+		10,
+		11,
+		12,
+		13,
+		14,
+		1,
+		2,
+		3,
+		4,
+		5,
+		6,
+		7,
+		8,
+		9,
+		10,
+		11,
+		15 };
+static const short bssid_palette_256_fg_colors[24]
+	= { 196, 208, 226, 118, 46, 48, 51, 39, 33, 57, 93, 201,
+		203, 190, 82, 37, 80, 75, 61, 99, 135, 168, 220, 123 };
+static const short bssid_palette_rgb[24][3]
+	= {
+		{ 918, 424, 451 },
+		{ 866, 494, 261 },
+		{ 498, 851, 384 },
+		{ 976, 686, 310 },
+		{ 584, 402, 915 },
+		{ 325, 741, 980 },
+		{ 804, 631, 980 },
+		{ 565, 882, 776 },
+		{ 941, 443, 471 },
+		{ 667, 851, 298 },
+		{ 1000, 706, 329 },
+		{ 349, 761, 1000 },
+		{ 824, 651, 1000 },
+		{ 584, 902, 796 },
+		{ 930, 583, 530 },
+		{ 742, 915, 291 },
+		{ 324, 828, 707 },
+		{ 415, 628, 1000 },
+		{ 706, 554, 882 },
+		{ 816, 502, 1000 },
+		{ 1000, 690, 770 },
+		{ 1000, 800, 320 },
+		{ 741, 902, 651 },
+		{ 630, 771, 920 },
+	};
 
 static size_t ap_header_label_offset(const struct ap_header_field * field)
 {
@@ -193,6 +266,20 @@ static const struct station_header_field station_header_fields[] = {
 	{ STATION_HEADER_PROBES, STA_SORT_BY_PROBES, "Probes", 6, 0, 2 },
 };
 
+static const int station_sort_cycle_fields[] = {
+	STA_SORT_BY_BSSID,
+	STA_SORT_BY_STATION,
+	STA_SORT_BY_BAND,
+	STA_SORT_BY_LA,
+	STA_SORT_BY_POWER,
+	STA_SORT_BY_RATE,
+	STA_SORT_BY_LOST,
+	STA_SORT_BY_FRAMES,
+	STA_SORT_BY_LAST_SEEN,
+	STA_SORT_BY_NOTES,
+	STA_SORT_BY_PROBES,
+};
+
 static size_t station_header_label_offset(const struct station_header_field * field)
 {
 	size_t offset = (size_t) field->separator_spaces;
@@ -206,6 +293,39 @@ static size_t station_header_label_offset(const struct station_header_field * fi
 	}
 
 	return (offset);
+}
+
+static int cycle_sort_field_from_list(const int * fields,
+									  size_t field_count,
+									  int sort_by,
+									  int direction)
+{
+	size_t i;
+	size_t start = 0;
+	int found = 0;
+
+	if (fields == NULL || field_count == 0) return (sort_by);
+	if (direction == 0) direction = 1;
+
+	for (i = 0; i < field_count; i++)
+	{
+		if (fields[i] == sort_by)
+		{
+			start = i;
+			found = 1;
+			break;
+		}
+	}
+
+	if (!found)
+		return ((direction > 0) ? fields[0] : fields[field_count - 1]);
+
+	if (direction > 0)
+		start = (start + 1) % field_count;
+	else
+		start = (start == 0) ? (field_count - 1) : (start - 1);
+
+	return (fields[start]);
 }
 
 static size_t build_station_header_line(char * line,
@@ -241,6 +361,24 @@ static size_t build_station_header_line(char * line,
 
 	line[used] = '\0';
 	return (used);
+}
+
+int airodump_tui_cycle_ap_sort_field(int sort_by, int direction)
+{
+	return (cycle_sort_field_from_list(ap_sort_cycle_fields,
+									  sizeof(ap_sort_cycle_fields)
+										/ sizeof(ap_sort_cycle_fields[0]),
+									  sort_by,
+									  direction));
+}
+
+int airodump_tui_cycle_station_sort_field(int sort_by, int direction)
+{
+	return (cycle_sort_field_from_list(station_sort_cycle_fields,
+									  sizeof(station_sort_cycle_fields)
+										/ sizeof(station_sort_cycle_fields[0]),
+									  sort_by,
+									  direction));
 }
 
 static void render_station_header_row(int y,
@@ -659,17 +797,9 @@ static void security_auth_string(char * out, size_t len, unsigned int security)
 		strlcpy(out, "", len);
 }
 
-static int power_pair(const struct AP_info * ap)
+static int is_broadcast_ap(const struct AP_info * ap)
 {
-	if (ap != NULL && memcmp(ap->bssid, BROADCAST, 6) == 0)
-		return (6);
-	if (ap->marked && ap->marked_color >= 1 && ap->marked_color <= 7)
-		return (ap->marked_color);
-
-	if (ap->avg_power >= -45) return (2);
-	if (ap->avg_power >= -60) return (3);
-	if (ap->avg_power >= -75) return (4);
-	return (5);
+	return (ap != NULL && memcmp(ap->bssid, BROADCAST, 6) == 0);
 }
 
 static char ap_row_marker(const struct AP_info * ap, int selected)
@@ -681,14 +811,43 @@ static char ap_row_marker(const struct AP_info * ap, int selected)
 	return (' ');
 }
 
+#define BSSID_COLOR_PAIR_FIRST 8
+#define BSSID_COLOR_BUCKETS 24
+#define BSSID_COLOR_PAIR_LAST (BSSID_COLOR_PAIR_FIRST + BSSID_COLOR_BUCKETS - 1)
+
+static int row_color_pair_from_bssid(const uint8_t * bssid)
+{
+	unsigned int mix;
+	unsigned int bucket;
+	int i;
+
+	if (bssid == NULL || memcmp(bssid, BROADCAST, 6) == 0)
+		return (7);
+
+	mix = 2166136261u;
+	for (i = 0; i < 6; i++)
+	{
+		mix ^= (unsigned int) bssid[i];
+		mix *= 16777619u;
+	}
+	bucket = mix % BSSID_COLOR_BUCKETS;
+	if (bssid_palette_extended)
+		return ((int) bucket + BSSID_COLOR_PAIR_FIRST);
+	return ((int) (bucket % 6) + 1);
+}
+
+static int ap_color_pair(const struct AP_info * ap)
+{
+	if (ap == NULL)
+		return (7);
+	return (row_color_pair_from_bssid(ap->bssid));
+}
+
 static int station_color_pair(const struct ST_info * st)
 {
-	if (st == NULL) return (0);
-	if (st->marked && st->marked_color >= 1 && st->marked_color <= 7)
-		return (st->marked_color);
-	if ((st->stmac[0] & 0x02) != 0)
-		return (6);
-	return (0);
+	if (st == NULL || st->base == NULL || is_broadcast_ap(st->base))
+		return (7);
+	return (ap_color_pair(st->base));
 }
 
 static int station_is_locally_administered(const struct ST_info * st)
@@ -918,6 +1077,7 @@ static void append_ap_core_columns(char * line,
 								   const char * channel,
 								   const char * band,
 								   const char * stas,
+								   const char * mbit,
 								   const char * std,
 								   const char * cipher,
 								   const char * auth)
@@ -930,6 +1090,7 @@ static void append_ap_core_columns(char * line,
 	append_padded_column(line, line_size, used, channel, 3, 1, 2);
 	append_padded_column(line, line_size, used, band, 4, 0, 2);
 	append_padded_column(line, line_size, used, stas, 11, 1, 2);
+	append_padded_column(line, line_size, used, mbit, 5, 1, 2);
 	append_padded_column(line, line_size, used, std, 6, 0, 1);
 	append_padded_column(line, line_size, used, cipher, 7, 0, 1);
 	append_padded_column(line, line_size, used, auth, 7, 0, 1);
@@ -1202,17 +1363,18 @@ static void render_ap_row(int y,
 	char channel[16];
 	const char * band;
 	char stas[16];
+	char mbit[16];
 	char cipher[32];
 	char auth[32];
 	char std[16];
-	int pair = 0;
+	int pair;
 	size_t used = 1;
 
 	security_cipher_string(cipher, sizeof(cipher), ap->security);
 	security_auth_string(auth, sizeof(auth), ap->security);
 	security_std_string(std, sizeof(std), ap->security);
 	format_ap_station_counts(stas, sizeof(stas), ap, view);
-	pair = power_pair(ap);
+	pair = ap_color_pair(ap);
 	snprintf(bssid,
 			 sizeof(bssid),
 			 "%02X:%02X:%02X:%02X:%02X:%02X",
@@ -1227,6 +1389,7 @@ static void render_ap_row(int y,
 	snprintf(data, sizeof(data), "%lu", ap->nb_data);
 	snprintf(rate, sizeof(rate), "%d", ap->nb_dataps);
 	snprintf(channel, sizeof(channel), "%d", ap->channel);
+	snprintf(mbit, sizeof(mbit), "%d", ap->max_speed);
 	band = band_label_from_value(ap->band, ap->channel);
 	if (width < 2) width = 2;
 	if (width > (int) sizeof(line) - 1) width = (int) sizeof(line) - 1;
@@ -1243,6 +1406,7 @@ static void render_ap_row(int y,
 						   channel,
 						   band,
 						   stas,
+						   mbit,
 						   std,
 						   cipher,
 						   auth);
@@ -1293,20 +1457,30 @@ static void render_ap_row(int y,
 
 	line[width] = '\0';
 
-	if (selected)
-		attron(A_BOLD);
-
 	if (state->colors_enabled)
+	{
 		attron(COLOR_PAIR(pair));
+		if (selected)
+			attron(A_BOLD);
+	}
+	else if (selected)
+	{
+		attron(A_BOLD);
+	}
 
 	mvaddnstr(y, x, line, width);
 	fill_inner_width(y, x + (int) strlen(line), width - (int) strlen(line));
 
 	if (state->colors_enabled)
+	{
+		if (selected)
+			attroff(A_BOLD);
 		attroff(COLOR_PAIR(pair));
-
-	if (selected)
+	}
+	else if (selected)
+	{
 		attroff(A_BOLD);
+	}
 }
 
 static size_t measure_ap_row_width(const struct AP_info * ap,
@@ -1322,6 +1496,7 @@ static size_t measure_ap_row_width(const struct AP_info * ap,
 	char channel[16];
 	const char * band;
 	char stas[16];
+	char mbit[16];
 	char cipher[32];
 	char auth[32];
 	char std[16];
@@ -1345,6 +1520,7 @@ static size_t measure_ap_row_width(const struct AP_info * ap,
 	snprintf(data, sizeof(data), "%lu", ap->nb_data);
 	snprintf(rate, sizeof(rate), "%d", ap->nb_dataps);
 	snprintf(channel, sizeof(channel), "%d", ap->channel);
+	snprintf(mbit, sizeof(mbit), "%d", ap->max_speed);
 	band = band_label_from_value(ap->band, ap->channel);
 
 	line[0] = ap_row_marker(ap, selected);
@@ -1359,6 +1535,7 @@ static size_t measure_ap_row_width(const struct AP_info * ap,
 						   channel,
 						   band,
 						   stas,
+						   mbit,
 						   std,
 						   cipher,
 						   auth);
@@ -1456,6 +1633,7 @@ static void render_station_row(int y,
 	const char * assoc_label = NULL;
 	const char * la_label = NULL;
 	const char * cell_text;
+	int pair;
 	size_t used = 0;
 	size_t probes_used = 0;
 	int station_band;
@@ -1516,6 +1694,7 @@ static void render_station_row(int y,
 		assoc_label = "unassociated";
 	if (station_is_locally_administered(st))
 		la_label = "LA";
+	pair = station_color_pair(st);
 
 	snprintf(power, sizeof(power), "%d", st->power);
 	snprintf(rate,
@@ -1591,19 +1770,13 @@ static void render_station_row(int y,
 	line[width] = '\0';
 	if (state->colors_enabled)
 	{
-		int pair = station_color_pair(st);
-
-		if (pair > 0)
-			attron(COLOR_PAIR(pair));
+		attron(COLOR_PAIR(pair));
 	}
 	mvaddnstr(y, x, line, width);
 	fill_inner_width(y, x + (int) strlen(line), width - (int) strlen(line));
 	if (state->colors_enabled)
 	{
-		int pair = station_color_pair(st);
-
-		if (pair > 0)
-			attroff(COLOR_PAIR(pair));
+		attroff(COLOR_PAIR(pair));
 	}
 }
 
@@ -1660,6 +1833,21 @@ static void draw_scrollbar(int top,
 			mvaddch(y, x, ACS_VLINE);
 		}
 	}
+}
+
+static void render_count_tag(int top, int left, int width, size_t count)
+{
+	char buf[32];
+	int len;
+	int x;
+
+	if (width < 4) return;
+
+	snprintf(buf, sizeof(buf), " (%lu)", (unsigned long) count);
+	len = (int) strlen(buf);
+	x = left + width - 1 - len;
+	if (x <= left) return;
+	mvaddnstr(top, x, buf, len);
 }
 
 static void render_ascii_box(int top, int left, int height, int width, const char * title)
@@ -1843,7 +2031,7 @@ static void render_status_line(const struct airodump_tui_state * state,
 
 	snprintf(line,
 			 sizeof(line),
-			 "?:help | v:channels | g:regdom | Tab/Left/Right:focus | Arrows/PgUp/PgDn/Home/End:scroll | q:quit");
+	"?:help | v:channels | b/B:band | l/r:lock/resume | d:deauth | s/S:sort | i:order | Tab/Left/Right:focus | Arrows/PgUp/PgDn/Home/End:scroll | q:quit");
 
 	if (COLS < 1) return;
 	width = MIN(COLS - 1, (int) sizeof(line) - 1);
@@ -1862,19 +2050,19 @@ static void render_help_overlay(void)
 		"Home / End: jump to top/bottom",
 		"Mouse wheel: scroll pane",
 		"Mouse click header: sort column",
-		"q: quit",
-		"o: toggle colors",
-		"b / B: switch band next/previous",
-		"g: set regdom",
-		"r: resume hopping",
-		"d: log stations / deauth",
-		"s / S: cycle sort in active pane next/previous",
-		"R: toggle realtime sorting",
-		"M: toggle mouse capture",
-		"c: clear AP filter",
+		"b / B: switch band next / previous",
+		"l / r: lock channel / resume hopping",
+		"d: deauth selected AP's stations",
+		"s / S: cycle sort in active pane next / previous",
+		"i: invert sort order",
+		"g: set regulatory domain",
+		"v: view channel availability",
 		"t: tune channel",
 		"w: write WPA snapshot",
-		"v: view channel availability",
+		"c: clear AP filter",
+		"o: toggle colors",
+		"M: toggle mouse capture",
+		"q: quit",
 	};
 	const int line_count = (int) (sizeof(lines) / sizeof(lines[0]));
 	int max_len = 0;
@@ -2037,6 +2225,33 @@ static void ensure_colors(struct airodump_tui_state * state)
 #endif
 	for (i = 1; i <= 7; i++)
 		init_pair(i, i, -1);
+	bssid_palette_extended = 0;
+	if (can_change_color() && COLORS > 39 && COLOR_PAIRS > BSSID_COLOR_PAIR_LAST)
+	{
+		bssid_palette_extended = 1;
+		for (i = 0; i < BSSID_COLOR_BUCKETS; i++)
+		{
+			short color_id = 16 + i;
+
+			init_color(color_id,
+					   bssid_palette_rgb[i][0],
+					   bssid_palette_rgb[i][1],
+					   bssid_palette_rgb[i][2]);
+			init_pair(BSSID_COLOR_PAIR_FIRST + i, color_id, -1);
+		}
+	}
+	else if (COLORS >= 256 && COLOR_PAIRS > BSSID_COLOR_PAIR_LAST)
+	{
+		bssid_palette_extended = 1;
+		for (i = 0; i < BSSID_COLOR_BUCKETS; i++)
+			init_pair(BSSID_COLOR_PAIR_FIRST + i, bssid_palette_256_fg_colors[i], -1);
+	}
+	else if (COLORS >= 16 && COLOR_PAIRS > BSSID_COLOR_PAIR_LAST)
+	{
+		bssid_palette_extended = 1;
+		for (i = 0; i < 12; i++)
+			init_pair(BSSID_COLOR_PAIR_FIRST + i, bssid_palette_fallback_fg_colors[i], -1);
+	}
 	state->colors_enabled = 1;
 }
 
@@ -2297,6 +2512,7 @@ void airodump_tui_render(struct airodump_tui_state * state,
 					   state->ap_visible_rows,
 					   ap_box_left + ap_box_width - 2,
 					   state->focus == 0);
+		render_count_tag(ap_box_top + ap_height - 1, ap_box_left, ap_box_width, ap_count);
 	}
 	else if (view->show_ap)
 	{
@@ -2470,6 +2686,7 @@ void airodump_tui_render(struct airodump_tui_state * state,
 					   state->sta_visible_rows,
 					   sta_box_width - 2,
 					   state->focus == 1);
+		render_count_tag(sta_box_top + sta_height - 1, sta_box_left, sta_box_width, st_count);
 	}
 
 	render_status_line(state, view);

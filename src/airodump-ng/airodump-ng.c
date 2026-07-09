@@ -129,24 +129,21 @@ struct probe_log_entry
 static struct probe_log_entry * probe_log_entries = NULL;
 
 static int abg_chans[]
-	= {1,   7,   13,  2,   8,   3,   14,  9,   4,   10,  5,   11,  6,
-	   12,  36,  38,  40,  42,  44,  46,  48,  50,  52,  54,  56,  58,
-	   60,  62,  64,  100, 102, 104, 106, 108, 110, 112, 114, 116, 118,
-	   120, 122, 124, 126, 128, 132, 134, 136, 138, 140, 142, 144, 149,
-	   151, 153, 155, 157, 159, 161, 165, 169, 173, 0};
-static int bg_chans[] = {1, 7, 13, 2, 8, 3, 14, 9, 4, 10, 5, 11, 6, 12, 0};
-static const int bg_chans_base[] = {1, 7, 13, 2, 8, 3, 14, 9, 4, 10, 5, 11, 6, 12, 0};
+	= {1,   2,   3,   4,   5,   6,   7,   8,   9,   10,  11,  12,  13,
+	   14,  36,  40,  44,  48,  52,  56,  60,  64,  100, 104, 108, 112,
+	   116, 120, 124, 128, 132, 136, 140, 144, 149, 153, 157, 161, 165,
+	   169, 173, 0};
+static int bg_chans[] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 0};
+static const int bg_chans_base[] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 0};
 
 static int a_chans[]
-	= {36,  38,  40,  42,  44,  46,  48,  50,  52,  54,  56,  58,
-	   60,  62,  64,  100, 102, 104, 106, 108, 110, 112, 114, 116,
-	   118, 120, 122, 124, 126, 128, 132, 134, 136, 138, 140, 142,
-	   144, 149, 151, 153, 155, 157, 159, 161, 165, 169, 173, 0};
+	= {36,  40,  44,  48,  52,  56,  60,  64,  100, 104, 108, 112,
+	   116, 120, 124, 128, 132, 136, 140, 144, 149, 153, 157, 161,
+	   165, 169, 173, 0};
 static const int a_chans_base[]
-	= {36,  38,  40,  42,  44,  46,  48,  50,  52,  54,  56,  58,
-	   60,  62,  64,  100, 102, 104, 106, 108, 110, 112, 114, 116,
-	   118, 120, 122, 124, 126, 128, 132, 134, 136, 138, 140, 142,
-	   144, 149, 151, 153, 155, 157, 159, 161, 165, 169, 173, 0};
+	= {36,  40,  44,  48,  52,  56,  60,  64,  100, 104, 108, 112,
+	   116, 120, 124, 128, 132, 136, 140, 144, 149, 153, 157, 161,
+	   165, 169, 173, 0};
 
 // Define an array of all ax channels - primary and secondary
 int ax_all_chans[] 
@@ -230,6 +227,9 @@ static const int channel_frequency_map_a[] = {
     153, 5765,
     157, 5785,
     161, 5805,
+    165, 5825,
+    169, 5845,
+    173, 5865,
     -1, -1     // End marker
 };
 
@@ -851,7 +851,6 @@ static struct local_options
 	} en_selection_direction;
 	int num_cards;
 	int do_pause;
-	int do_sort_always;
 
 	pthread_mutex_t mx_print; /* lock write access to ap LL   */
 	pthread_mutex_t mx_sort; /* lock write access to ap LL   */
@@ -1151,7 +1150,6 @@ static void resetSelection(void)
 	lopt.p_selected_ap = NULL;
 	lopt.en_selection_direction = selection_direction_no;
 	lopt.do_pause = 0;
-	lopt.do_sort_always = 0;
 	memset(lopt.selected_bssid, '\x00', 6);
 }
 
@@ -1810,7 +1808,6 @@ static const char usage[] =
 	"      Mouse wheel           : Scroll pane under pointer\n"
 	"      Mouse click header    : Sort by column\n"
 	"      s / S                 : Cycle sort field next / previous\n"
-	"      R                     : Toggle realtime sorting\n"
 	"      b / B                 : Switch band next / previous\n"
 	"      v                     : Show channel availability for active band\n"
 	"      g                     : Set regulatory domain\n"
@@ -1818,12 +1815,13 @@ static const char usage[] =
 	"      t                     : Tune channel and stop hopping\n"
 	"      l                     : Lock to selected AP channel\n"
 	"      r                     : Resume channel hopping\n"
-	"      d                     : Run station logging/deauth workflow\n"
+	"      d                     : Deauth selected AP's stations\n"
+	"      i                     : Invert sort order\n"
 	"      c                     : Clear AP filter\n"
 	"      o                     : Toggle colors\n"
 	"      M                     : Toggle mouse capture\n"
-	"      q                     : Quit\n"
 	"      Hopper warnings       : Driver refused a channel/frequency; try b/B for band\n"
+	"      q                     : Quit\n"
 	"\n"
 	"      --help                : Displays this usage screen\n"
 	"\n";
@@ -4955,7 +4953,6 @@ static size_t get_allowed_ax_frequencies(int * freqs, size_t max_freqs)
 			p++;
 		if (sscanf(p, "%d", &freq) != 1) continue;
 		if (freq < 5925 || freq > 7125) continue;
-		if (strstr(line, "(disabled)") != NULL) continue;
 
 		for (i = 0; i < count; i++)
 		{
@@ -5139,14 +5136,6 @@ static int set_kernel_regdom(const char * country)
 
 	if (country == NULL || strlen(country) != 2) return (0);
 	get_cached_regdom(1);
-	if (get_cached_regdom_self_managed())
-	{
-		snprintf(lopt.message,
-				 sizeof(lopt.message),
-				 "][ Interface's regdom is self-managed, we can't change it :(");
-		append_tui_message_history_now(lopt.message);
-		return (0);
-	}
 
 	snprintf(cmd, sizeof(cmd), "iw reg set %s >/dev/null 2>&1", country);
 	rc = system(cmd);
@@ -5497,28 +5486,49 @@ static const char * station_sort_field_name(int sort_by)
 	}
 }
 
+static const char * ap_sort_field_name(int sort_by)
+{
+	switch (sort_by)
+	{
+		case SORT_BY_NOTHING:
+			return ("none");
+		case SORT_BY_BSSID:
+			return ("BSSID");
+		case SORT_BY_POWER:
+			return ("power");
+		case SORT_BY_BEACON:
+			return ("beacons");
+		case SORT_BY_DATA:
+			return ("data");
+		case SORT_BY_PRATE:
+			return ("rate");
+		case SORT_BY_CHAN:
+			return ("channel");
+		case SORT_BY_STAS:
+			return ("stations");
+		case SORT_BY_MBIT:
+			return ("Mbit");
+		case SORT_BY_ENC:
+			return ("ENC");
+		case SORT_BY_CIPHER:
+			return ("cipher");
+		case SORT_BY_AUTH:
+			return ("auth");
+		case SORT_BY_ESSID:
+			return ("ESSID");
+		default:
+			return ("unknown");
+	}
+}
+
 static int cycle_station_sort_field(int sort_by, int direction)
 {
-	if (direction == 0) direction = 1;
-	if (sort_by < STA_SORT_BY_BSSID || sort_by > STA_SORT_MAX)
-		return (STA_SORT_BY_BSSID);
-	sort_by += (direction > 0) ? 1 : -1;
-	if (sort_by > STA_SORT_MAX)
-		sort_by = STA_SORT_BY_BSSID;
-	else if (sort_by < STA_SORT_BY_BSSID)
-		sort_by = STA_SORT_MAX;
-	return (sort_by);
+	return (airodump_tui_cycle_station_sort_field(sort_by, direction));
 }
 
 static int cycle_ap_sort_field(int sort_by, int direction)
 {
-	if (direction == 0) direction = 1;
-	sort_by += (direction > 0) ? 1 : -1;
-	if (sort_by > MAX_SORT)
-		sort_by = SORT_BY_NOTHING;
-	else if (sort_by < SORT_BY_NOTHING)
-		sort_by = MAX_SORT;
-	return (sort_by);
+	return (airodump_tui_cycle_ap_sort_field(sort_by, direction));
 }
 
 static int ap_security_std_rank(unsigned int security)
@@ -6312,8 +6322,6 @@ static int handle_keycode(int keycode)
 		if (use_ncurses_tui && tui_state.focus == 1)
 		{
 			tui_state.sta_sort_by = cycle_station_sort_field(tui_state.sta_sort_by, direction);
-			tui_state.sta_sort_inv *= -1;
-			if (tui_state.sta_sort_inv == 0) tui_state.sta_sort_inv = 1;
 			snprintf(lopt.message,
 					 sizeof(lopt.message),
 					 "][ sorting stations by %s (%s)",
@@ -6322,21 +6330,44 @@ static int handle_keycode(int keycode)
 		}
 		else
 		{
-			int old_sort_by = lopt.sort_by;
-
 			lopt.sort_by = cycle_ap_sort_field(lopt.sort_by, direction);
-			if (old_sort_by == lopt.sort_by)
-				lopt.sort_inv *= -1;
-			else
-				lopt.sort_inv = 1;
-			if (lopt.sort_inv == 0) lopt.sort_inv = 1;
 			ALLEGE(pthread_mutex_lock(&(lopt.mx_sort)) == 0);
 			dump_sort();
 			ALLEGE(pthread_mutex_unlock(&(lopt.mx_sort)) == 0);
 			snprintf(lopt.message,
 					 sizeof(lopt.message),
-					 "][ sorting APs (%s)",
+					 "][ sorting APs by %s (%s)",
+					 ap_sort_field_name(lopt.sort_by),
 					 (lopt.sort_inv < 0) ? "descending" : "ascending");
+		}
+		redraw = 1;
+	}
+
+	if (keycode == KEY_i)
+	{
+		if (use_ncurses_tui && tui_state.focus == 1)
+		{
+			tui_state.sta_sort_inv *= -1;
+			if (tui_state.sta_sort_inv < 0)
+				snprintf(lopt.message,
+						 sizeof(lopt.message),
+						 "][ inverted station sorting order");
+			else
+				snprintf(lopt.message,
+						 sizeof(lopt.message),
+						 "][ normal station sorting order");
+		}
+		else
+		{
+			lopt.sort_inv *= -1;
+			if (lopt.sort_inv < 0)
+				snprintf(lopt.message,
+						 sizeof(lopt.message),
+						 "][ inverted sorting order");
+			else
+				snprintf(lopt.message,
+						 sizeof(lopt.message),
+						 "][ normal sorting order");
 		}
 		redraw = 1;
 	}
@@ -6385,6 +6416,15 @@ static int handle_keycode(int keycode)
 
 	if (keycode == 'g')
 	{
+		get_cached_regdom(1);
+		if (get_cached_regdom_self_managed())
+		{
+			snprintf(lopt.message,
+					 sizeof(lopt.message),
+					 "][ Interface's regdom is self-managed, we can't change it :(");
+			append_tui_message_history_now(lopt.message);
+			goto done;
+		}
 		begin_regdom_entry();
 		goto done;
 	}
@@ -6406,20 +6446,6 @@ static int handle_keycode(int keycode)
 	{
 		if (switch_band(keycode == 'B' ? -1 : 1))
 			redraw = 1;
-	}
-
-	if (keycode == 'R')
-	{
-		lopt.do_sort_always = (lopt.do_sort_always + 1) % 2;
-		if (lopt.do_sort_always)
-			snprintf(lopt.message,
-					 sizeof(lopt.message),
-					 "][ realtime sorting activated");
-		else
-			snprintf(lopt.message,
-					 sizeof(lopt.message),
-					 "][ realtime sorting deactivated");
-		redraw = 1;
 	}
 
 	if (keycode == KEY_d)
@@ -6504,35 +6530,6 @@ static int handle_keycode(int keycode)
 			set_selected_ap(lopt.p_selected_ap->next, selection_direction_up);
 			redraw = 1;
 		}
-	}
-
-	if (keycode == KEY_i)
-	{
-		if (use_ncurses_tui && tui_state.focus == 1)
-		{
-			tui_state.sta_sort_inv *= -1;
-			if (tui_state.sta_sort_inv < 0)
-				snprintf(lopt.message,
-						 sizeof(lopt.message),
-						 "][ inverted station sorting order");
-			else
-				snprintf(lopt.message,
-						 sizeof(lopt.message),
-						 "][ normal station sorting order");
-		}
-		else
-		{
-			lopt.sort_inv *= -1;
-			if (lopt.sort_inv < 0)
-				snprintf(lopt.message,
-						 sizeof(lopt.message),
-						 "][ inverted sorting order");
-			else
-				snprintf(lopt.message,
-						 sizeof(lopt.message),
-						 "][ normal sorting order");
-		}
-		redraw = 1;
 	}
 
 	if (keycode == KEY_TAB)
@@ -6840,7 +6837,7 @@ static void dump_print(int ws_row, int ws_col, int if_num)
 
 	if (nlines >= ws_row) return;
 
-	if (lopt.do_sort_always || ap_sort_is_live(lopt.sort_by))
+	if (ap_sort_is_live(lopt.sort_by))
 	{
 		ALLEGE(pthread_mutex_lock(&(lopt.mx_sort)) == 0);
 		dump_sort();
